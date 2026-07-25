@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 import ccxt
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app import __version__
@@ -63,6 +64,17 @@ def create_app() -> FastAPI:
         ),
         version=__version__,
         lifespan=lifespan,
+    )
+
+    # Local dashboard dev servers (Vite) only.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_methods=["GET"],
+        allow_headers=["*"],
     )
 
     @app.get("/", include_in_schema=False)

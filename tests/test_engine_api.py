@@ -142,6 +142,12 @@ def test_api_score_endpoint_contract():
         assert body["long_plan"]["side"] == "long"
         assert body["short_plan"]["side"] == "short"
 
+        # Chart data for the dashboard.
+        assert len(body["klines"]) > 0
+        kline = body["klines"][-1]
+        assert set(kline) == {"time", "open", "high", "low", "close"}
+        assert kline["close"] == body["price"]
+
 
 def test_api_rejects_non_whitelisted_symbol_with_400():
     with TestClient(app) as client:

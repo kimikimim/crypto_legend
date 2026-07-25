@@ -85,6 +85,7 @@ class AnalysisResult:
     regime: str                       # 1D macro regime: bull / bear / chop
     long_plan: TradePlan | None
     short_plan: TradePlan | None
+    klines: list[dict]                # recent 15m candles for charting
 
     @property
     def primary_direction(self) -> str:
@@ -230,7 +231,22 @@ class MTFAnalysisEngine:
             regime=regime,
             long_plan=long_plan,
             short_plan=short_plan,
+            klines=self._chart_klines(enriched["15m"]),
         )
+
+    @staticmethod
+    def _chart_klines(m15: pd.DataFrame, count: int = 300) -> list[dict]:
+        tail = m15.tail(count)
+        return [
+            {
+                "time": ts.isoformat(),
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+            }
+            for ts, r in tail.iterrows()
+        ]
 
     def _macro_regime(self, symbol: str, use_closed_candle: bool) -> str:
         try:

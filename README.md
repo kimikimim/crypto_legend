@@ -24,7 +24,20 @@ python3 -m venv .venv
 .venv/bin/uvicorn app.main:app --reload
 # GET /api/v1/score/BTCUSDT?use_closed_candle=true
 # GET /api/v1/symbols
+
+# Web dashboard (needs the API running on :8000)
+cd dashboard && npm install && npm run dev
+# open http://localhost:5173
 ```
+
+## Dashboard
+
+`dashboard/` is a React (Vite + TypeScript + Tailwind v4) single-page app:
+TradingView `lightweight-charts` candlesticks with SL/TP1/TP2/entry price
+lines, symbol switcher (BTC/ETH/SOL), regime badge, long/short score bars,
+execution-plan card with leverage & risk weight, squeeze warning overlay,
+and 60s auto-refresh. A setup is shown as NEUTRAL when the best score is
+below 40. The API allows CORS from `localhost:5173` only.
 
 ## Architecture
 

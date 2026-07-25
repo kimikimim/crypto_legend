@@ -114,6 +114,14 @@ class EntryZoneModel(BaseModel):
     high: float
 
 
+class KlineModel(BaseModel):
+    time: str          # ISO 8601, UTC candle open time
+    open: float
+    high: float
+    low: float
+    close: float
+
+
 class TradePlanModel(BaseModel):
     side: str
     entry_zone: EntryZoneModel
@@ -151,6 +159,7 @@ class ScoreResponse(BaseModel):
     fib_levels_4h: list[FibLevelModel]
     fib_levels_1h: list[FibLevelModel]
     smart_money: SmartMoneyModel
+    klines: list[KlineModel]
 
 
 def _category(c: CategoryScore) -> CategoryScoreModel:
@@ -208,6 +217,7 @@ def to_response(result: AnalysisResult) -> ScoreResponse:
         risk_weight=primary.risk_weight if primary else None,
         long_plan=_plan(result.long_plan),
         short_plan=_plan(result.short_plan),
+        klines=[KlineModel(**k) for k in result.klines],
         long_breakdown=_direction(result.scores.long),
         short_breakdown=_direction(result.scores.short),
         confluence_zones=[
