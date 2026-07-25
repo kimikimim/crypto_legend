@@ -24,6 +24,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_STORE_DIR = Path("data/ohlcv")
 
 
+def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Aggregate a fine series into a coarser one (15m -> 1h/4h/1d).
+
+    Replay derives every higher timeframe from the stored 15m candles rather
+    than downloading each separately: the series are then guaranteed mutually
+    consistent, and one archive covers all of them. Binance's 1h/4h/1d bars
+    are anchored to UTC midnight, which is also pandas' default origin here.
+    """
+    agg = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    out = (
+        df.resample(TF_DELTA[timeframe], label="left", closed="left")
+        .agg(agg)
+        .dropna(subset=["open", "high", "low", "close"])
+    )
+    out.index.name = "timestamp"
+    return out
+
+
 @dataclass(frozen=True)
 class IntegrityReport:
     """What is wrong with a stored series, if anything."""

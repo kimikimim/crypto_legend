@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from app.config import DEFAULT_CONFIG, TIMEFRAMES, EngineConfig
+from app.config import DEFAULT_CONFIG, TF_DELTA, TIMEFRAMES, EngineConfig
 from app.data_fetcher import DataFetcher, drop_open_candle, validate_symbol
 from app.exceptions import InsufficientDataError
 from app.fibonacci import (
@@ -133,6 +133,7 @@ class MTFAnalysisEngine:
         self.liq_tracker = liquidation_tracker
 
     def analyze(self, symbol: str, use_closed_candle: bool = True) -> AnalysisResult:
+        """Score the latest candle from freshly fetched exchange data."""
         unified = validate_symbol(symbol)
         logger.info(
             "Analyzing %s (use_closed_candle=%s)", unified, use_closed_candle
@@ -141,14 +142,53 @@ class MTFAnalysisEngine:
         frames = self.fetcher.fetch_mtf(unified, TIMEFRAMES, limit=self.cfg.fetch_limit)
         if use_closed_candle:
             frames = {tf: drop_open_candle(df, tf) for tf, df in frames.items()}
-        for tf, df in frames.items():
-            if len(df) < self.cfg.min_candles:
+
+        # Daily series for the macro regime filter (fail-soft: no penalty).
+        try:
+            daily = self.fetcher.fetch_ohlcv(unified, "1d", limit=self.cfg.fetch_limit)
+            frames["1d"] = drop_open_candle(daily, "1d") if use_closed_candle else daily
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("1D history unavailable for %s: %s", unified, exc)
+
+        eval_close = frames["15m"].index[-1] + TF_DELTA["15m"]
+        oi_stats = self._open_interest_stats(unified, eval_close)
+        cvd_stats = self._cvd_stats(unified, eval_close, frames["15m"])
+
+        return self.analyze_frames(
+            unified,
+            frames,
+            oi_stats=oi_stats,
+            cvd_stats=cvd_stats,
+            use_closed_candle=use_closed_candle,
+        )
+
+    def analyze_frames(
+        self,
+        symbol: str,
+        frames: dict[str, pd.DataFrame],
+        *,
+        oi_stats: OpenInterestStats = OpenInterestStats(),
+        cvd_stats: CvdStats = CvdStats(),
+        use_closed_candle: bool = True,
+    ) -> AnalysisResult:
+        """Score the last 15m bar of `frames` — the whole analysis with no I/O.
+
+        Live and replay both come through here, which is what makes a
+        backtest a statement about the live system rather than about a
+        parallel reimplementation of it. Replay passes frames truncated at
+        the bar being scored, so the forward-looking mitigation scans in
+        find_fvgs / find_order_blocks simply have no future to see.
+        """
+        unified = validate_symbol(symbol)
+        for tf in TIMEFRAMES:
+            df = frames.get(tf)
+            if df is None or len(df) < self.cfg.min_candles:
                 raise InsufficientDataError(
-                    f"{unified} {tf}: only {len(df)} candles "
+                    f"{unified} {tf}: only {0 if df is None else len(df)} candles "
                     f"(need >= {self.cfg.min_candles})"
                 )
 
-        enriched = {tf: self.indicators.enrich(df) for tf, df in frames.items()}
+        enriched = {tf: self.indicators.enrich(frames[tf]) for tf in TIMEFRAMES}
         merged = merge_mtf(enriched["15m"], enriched["1h"], enriched["4h"])
         row = merged.iloc[-1]
         eval_close = merged.index[-1] + pd.Timedelta(minutes=15)
@@ -180,11 +220,7 @@ class MTFAnalysisEngine:
         )
 
         # --- 1D macro regime filter (fail-soft to "chop" = no penalty) ---
-        regime = self._macro_regime(unified, use_closed_candle)
-
-        # --- derivatives data (fail-soft: engine still scores without it) ---
-        oi_stats = self._open_interest_stats(unified, eval_close)
-        cvd_stats = self._cvd_stats(unified, eval_close, enriched["15m"])
+        regime = self._macro_regime(unified, frames.get("1d"))
 
         # --- liquidation signal: measured stream if warm, else OI proxy ---
         liq_signal = self._liquidation_signal(unified, row, oi_stats, eval_close)
@@ -275,13 +311,12 @@ class MTFAnalysisEngine:
             for ts, r in tail.iterrows()
         ]
 
-    def _macro_regime(self, symbol: str, use_closed_candle: bool) -> str:
+    def _macro_regime(self, symbol: str, df_1d: pd.DataFrame | None) -> str:
+        if df_1d is None or df_1d.empty:
+            return REGIME_CHOP
         try:
-            df_1d = self.fetcher.fetch_ohlcv(symbol, "1d", limit=self.cfg.fetch_limit)
-            if use_closed_candle:
-                df_1d = drop_open_candle(df_1d, "1d")
             regime = determine_regime(df_1d, self.cfg)
-            logger.info("1D macro regime for %s: %s", symbol, regime)
+            logger.debug("1D macro regime for %s: %s", symbol, regime)
             return regime
         except Exception as exc:  # noqa: BLE001 — fail-soft, no regime penalty
             logger.warning("1D regime unavailable for %s: %s", symbol, exc)
