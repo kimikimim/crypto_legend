@@ -136,6 +136,31 @@ def test_sync_downloads_history_then_stays_quiet_when_current(tmp_path, clean):
     assert len(fetcher.requests) == 1
 
 
+def test_sync_backfills_history_older_than_the_store(tmp_path, clean):
+    """A store holding only recent bars must not mask a request for deeper
+    history — otherwise one short test download silently truncates the
+    entire backtest range."""
+    fetcher = RangeFetcher(clean)
+    store = OHLCVStore(tmp_path, fetcher=fetcher)
+    store.save("BTCUSDT", "15m", clean.iloc[180:])  # only the last 20 bars
+
+    report = store.sync("BTCUSDT", "15m", start=clean.index[0], end=clean.index[-1])
+    assert report.rows == 200
+    assert report.ok
+    assert fetcher.requests == [clean.index[0]]  # asked for the missing head
+
+
+def test_sync_fills_both_ends_in_one_call(tmp_path, clean):
+    fetcher = RangeFetcher(clean)
+    store = OHLCVStore(tmp_path, fetcher=fetcher)
+    store.save("BTCUSDT", "15m", clean.iloc[100:150])  # a middle slice only
+
+    report = store.sync("BTCUSDT", "15m", start=clean.index[0], end=clean.index[-1])
+    assert len(fetcher.requests) == 2
+    assert report.rows == 200
+    assert report.ok
+
+
 def test_sync_resumes_from_the_stored_tail(tmp_path, clean):
     """A partially built store must fetch only the missing tail."""
     fetcher = RangeFetcher(clean)

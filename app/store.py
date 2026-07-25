@@ -203,24 +203,36 @@ class OHLCVStore:
         """
         unified = validate_symbol(symbol)
         end = end or pd.Timestamp.now(tz="UTC")
+        step = TF_DELTA[timeframe]
         existing = self.load(unified, timeframe)
-        cursor = start
-        if not existing.empty:
-            cursor = max(start, existing.index[-1] + TF_DELTA[timeframe])
 
-        if cursor < end:
-            def _log(last: pd.Timestamp, n: int) -> None:
-                if progress:
-                    logger.info("  %s %s: +%d bars through %s", unified, timeframe, n, last)
+        def _log(last: pd.Timestamp, n: int) -> None:
+            if progress:
+                logger.info("  %s %s: +%d bars through %s", unified, timeframe, n, last)
 
+        # Two independent segments: older history the store is missing at the
+        # front, and new bars at the back. Only extending forward would let a
+        # short existing file permanently mask a request for deeper history.
+        segments: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        if existing.empty:
+            segments.append((start, end))
+        else:
+            if start < existing.index[0]:
+                segments.append((start, existing.index[0] - step))
+            tail_start = existing.index[-1] + step
+            if tail_start < end:
+                segments.append((tail_start, end))
+
+        if not segments:
+            logger.info("%s %s already covers the requested range", unified, timeframe)
+
+        for seg_start, seg_end in segments:
             fresh = self.fetcher.fetch_ohlcv_range(
-                unified, timeframe, since=cursor, until=end,
+                unified, timeframe, since=seg_start, until=seg_end,
                 on_page=_log if progress else None,
             )
             if not fresh.empty:
                 self.save(unified, timeframe, fresh)
-        else:
-            logger.info("%s %s already current", unified, timeframe)
 
         return self.validate(unified, timeframe)
 

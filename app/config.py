@@ -144,6 +144,9 @@ class EngineConfig:
     min_rr_tp1: float = 1.5         # net of costs; below this the setup is skipped
     min_score: float = 40.0         # below this the verdict is NEUTRAL
 
+    # --- backtest ---
+    max_hold_bars: int = 96         # 15m bars a trade may stay open (24h)
+
     @property
     def round_trip_cost_pct(self) -> float:
         """Entry + exit fees and slippage, as a percentage of notional."""
