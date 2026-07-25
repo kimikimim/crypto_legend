@@ -28,6 +28,7 @@ from app.exceptions import (
     InsufficientDataError,
     UnsupportedSymbolError,
 )
+from app.journal import SignalCollector, SignalJournal
 from app.liquidations import LiquidationCollector, LiquidationTracker
 from app.models import KlineModel, KlinesResponse, ScoreResponse, to_response
 
@@ -48,9 +49,22 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Liquidation websocket disabled (MTF_LIQ_WS=0) — proxy mode")
 
-    app.state.engine = MTFAnalysisEngine(liquidation_tracker=tracker)
+    engine = MTFAnalysisEngine(liquidation_tracker=tracker)
+    journal = SignalJournal()
+    app.state.engine = engine
+    app.state.journal = journal
+
+    signal_collector: SignalCollector | None = None
+    if os.environ.get("MTF_COLLECTOR", "1") != "0":
+        signal_collector = SignalCollector(engine, journal)
+        await signal_collector.start()
+    else:
+        logger.info("Signal collector disabled (MTF_COLLECTOR=0)")
+
     logger.info("MTF analysis engine initialized for %s", ", ".join(ALLOWED_SYMBOLS))
     yield
+    if signal_collector is not None:
+        await signal_collector.stop()
     if collector is not None:
         await collector.stop()
 
@@ -115,7 +129,33 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except (DataFetchError, ccxt.NetworkError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        # Forward-test ledger. Closed candles only: those are deterministic,
+        # so a row is a permanent fact rather than a snapshot of a moving bar.
+        journal: SignalJournal | None = getattr(request.app.state, "journal", None)
+        if journal is not None and use_closed_candle:
+            await asyncio.to_thread(journal.record, result)
+
         return to_response(result)
+
+    @app.get("/api/v1/journal")
+    async def journal_list(
+        request: Request,
+        symbol: str | None = None,
+        verdict: str | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> dict:
+        journal: SignalJournal | None = getattr(request.app.state, "journal", None)
+        if journal is None:
+            raise HTTPException(status_code=503, detail="Journal unavailable")
+        return {"signals": await asyncio.to_thread(journal.recent, symbol, verdict, limit)}
+
+    @app.get("/api/v1/journal/stats")
+    async def journal_stats(request: Request) -> dict:
+        journal: SignalJournal | None = getattr(request.app.state, "journal", None)
+        if journal is None:
+            raise HTTPException(status_code=503, detail="Journal unavailable")
+        return await asyncio.to_thread(journal.stats)
 
     @app.get("/api/v1/ticker/{symbol}")
     async def ticker(request: Request, symbol: str) -> dict:

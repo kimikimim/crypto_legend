@@ -44,9 +44,12 @@ def zigzag_closes(
 
 
 @pytest.fixture(autouse=True)
-def _no_liquidation_websocket(monkeypatch):
-    """Tests must never open the live @forceOrder stream."""
+def _isolate_side_effects(monkeypatch, tmp_path):
+    """Tests must never open the live @forceOrder stream or touch the real
+    journal database."""
     monkeypatch.setenv("MTF_LIQ_WS", "0")
+    monkeypatch.setenv("MTF_COLLECTOR", "0")
+    monkeypatch.setenv("MTF_JOURNAL_DB", str(tmp_path / "journal.db"))
 
 
 @pytest.fixture
