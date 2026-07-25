@@ -66,6 +66,7 @@ interface BackendResponse {
   short_plan: BackendPlan | null
   klines: BackendKline[]
   structure_zones: StructureZone[]
+  atr_15m: number | null
   evaluated_at: string
 }
 
@@ -95,7 +96,24 @@ interface SignalData {
   active_plan: TradePlan
   klines: BackendKline[]
   structure_zones: StructureZone[]
+  atr_15m: number | null
   evaluated_at: string
+}
+
+type ZoneType = StructureZone['type']
+type ZoneVisibility = Record<ZoneType, boolean>
+
+/** ATR proximity filter: keep only zones overlapping price ± mult × ATR. */
+function filterZonesByAtr(
+  zones: StructureZone[],
+  price: number,
+  atr: number | null,
+  mult = 2,
+): StructureZone[] {
+  if (atr == null || atr <= 0) return zones
+  const lo = price - mult * atr
+  const hi = price + mult * atr
+  return zones.filter((z) => z.max_price >= lo && z.min_price <= hi)
 }
 
 const NEUTRAL_PLAN: TradePlan = {
@@ -145,6 +163,7 @@ function toSignalData(r: BackendResponse): SignalData {
     active_plan,
     klines: r.klines,
     structure_zones: r.structure_zones ?? [],
+    atr_15m: r.atr_15m,
     evaluated_at: r.evaluated_at,
   }
 }
@@ -183,7 +202,7 @@ const fmt = (value: number): string =>
 // ---------------------------------------------------------------------------
 // Chart
 // ---------------------------------------------------------------------------
-function PriceChart({ data }: { data: SignalData }) {
+function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -272,8 +291,8 @@ function PriceChart({ data }: { data: SignalData }) {
     priceLinesRef.current.forEach((line) => series.removePriceLine(line))
     priceLinesRef.current = []
 
-    // Structure & fib zones: two boundary lines per zone.
-    for (const zone of data.structure_zones) {
+    // Structure & fib zones (pre-filtered by ATR proximity + type toggles).
+    for (const zone of zones) {
       const style = zoneLineStyle(zone)
       priceLinesRef.current.push(
         series.createPriceLine({
@@ -329,7 +348,7 @@ function PriceChart({ data }: { data: SignalData }) {
         }),
       )
     }
-  }, [data, applyDefaultRange])
+  }, [data, zones, applyDefaultRange])
 
   return (
     <div className="relative h-full min-h-[420px]">
@@ -347,6 +366,51 @@ function PriceChart({ data }: { data: SignalData }) {
 // ---------------------------------------------------------------------------
 // Right-column widgets
 // ---------------------------------------------------------------------------
+const ZONE_TOGGLE_META: Record<ZoneType, { label: string; dot: string }> = {
+  fib: { label: 'FIB', dot: 'bg-cyan-400' },
+  ob: { label: 'OB', dot: 'bg-emerald-400' },
+  fvg: { label: 'FVG', dot: 'bg-red-400' },
+}
+
+function ZoneToggles({
+  visibility,
+  counts,
+  onToggle,
+}: {
+  visibility: ZoneVisibility
+  counts: Record<ZoneType, number>
+  onToggle: (type: ZoneType) => void
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {(Object.keys(ZONE_TOGGLE_META) as ZoneType[]).map((type) => {
+        const active = visibility[type]
+        const meta = ZONE_TOGGLE_META[type]
+        return (
+          <button
+            key={type}
+            onClick={() => onToggle(type)}
+            title={`Show/hide ${meta.label} zones`}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-bold uppercase tracking-widest transition-colors ${
+              active
+                ? 'border-zinc-600 bg-zinc-800 text-zinc-100'
+                : 'border-zinc-800 bg-zinc-900/40 text-zinc-600 hover:text-zinc-400'
+            }`}
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                active ? meta.dot : 'bg-zinc-600'
+              }`}
+            />
+            {meta.label}
+            <span className="font-mono tabular-nums opacity-70">{counts[type]}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function RegimeBadge({ regime }: { regime: SignalData['regime'] }) {
   const styles = {
     bull: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400',
@@ -494,6 +558,32 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const [zoneVisibility, setZoneVisibility] = useState<ZoneVisibility>({
+    fib: true,
+    ob: true,
+    fvg: true,
+  })
+
+  // Default noise control: only zones overlapping price ± 2 × ATR(15m).
+  const nearbyZones = useMemo(
+    () =>
+      data ? filterZonesByAtr(data.structure_zones, data.price, data.atr_15m) : [],
+    [data],
+  )
+  const zoneCounts = useMemo(() => {
+    const counts: Record<ZoneType, number> = { fib: 0, ob: 0, fvg: 0 }
+    nearbyZones.forEach((z) => (counts[z.type] += 1))
+    return counts
+  }, [nearbyZones])
+  const visibleZones = useMemo(
+    () => nearbyZones.filter((z) => zoneVisibility[z.type]),
+    [nearbyZones, zoneVisibility],
+  )
+  const toggleZoneType = useCallback(
+    (type: ZoneType) =>
+      setZoneVisibility((v) => ({ ...v, [type]: !v[type] })),
+    [],
+  )
 
   const fetchSignal = useCallback(async (sym: Symbol_) => {
     setLoading(true)
@@ -590,7 +680,7 @@ export default function App() {
           </div>
           <div className="flex-1">
             {data ? (
-              <PriceChart data={data} />
+              <PriceChart data={data} zones={visibleZones} />
             ) : (
               <div className="flex h-full min-h-[420px] items-center justify-center text-sm text-zinc-600">
                 {loading ? 'Loading market data…' : 'No data'}
@@ -601,6 +691,17 @@ export default function App() {
 
         {/* Metrics — 1/3 */}
         <aside className="col-span-3 flex flex-col gap-4 lg:col-span-1">
+          <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2.5">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+              Zones · ±2 ATR
+            </span>
+            <ZoneToggles
+              visibility={zoneVisibility}
+              counts={zoneCounts}
+              onToggle={toggleZoneType}
+            />
+          </div>
+
           <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400">

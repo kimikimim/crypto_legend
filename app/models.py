@@ -171,6 +171,7 @@ class ScoreResponse(BaseModel):
     smart_money: SmartMoneyModel
     klines: list[KlineModel]
     structure_zones: list[StructureZoneModel]
+    atr_15m: float | None    # current 15m ATR — UI uses it for zone proximity filtering
 
 
 def _structure_zones(result: AnalysisResult) -> list[StructureZoneModel]:
@@ -264,6 +265,7 @@ def to_response(result: AnalysisResult) -> ScoreResponse:
         short_plan=_plan(result.short_plan),
         klines=[KlineModel(**k) for k in result.klines],
         structure_zones=_structure_zones(result),
+        atr_15m=result.atr_15m,
         long_breakdown=_direction(result.scores.long),
         short_breakdown=_direction(result.scores.short),
         confluence_zones=[

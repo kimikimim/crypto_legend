@@ -148,6 +148,9 @@ def test_api_score_endpoint_contract():
         assert set(kline) == {"time", "open", "high", "low", "close"}
         assert kline["close"] == body["price"]
 
+        # 15m ATR for the dashboard's zone proximity filter.
+        assert body["atr_15m"] is not None and body["atr_15m"] > 0
+
         # Unified structure zones for chart overlays.
         for zone in body["structure_zones"]:
             assert zone["type"] in ("fib", "ob", "fvg")

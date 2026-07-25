@@ -86,6 +86,7 @@ class AnalysisResult:
     long_plan: TradePlan | None
     short_plan: TradePlan | None
     klines: list[dict]                # recent 15m candles for charting
+    atr_15m: float | None             # current 15m ATR (for UI zone filtering)
 
     @property
     def primary_direction(self) -> str:
@@ -232,6 +233,9 @@ class MTFAnalysisEngine:
             long_plan=long_plan,
             short_plan=short_plan,
             klines=self._chart_klines(enriched["15m"]),
+            atr_15m=(
+                float(row["atr"]) if pd.notna(row["atr"]) and row["atr"] > 0 else None
+            ),
         )
 
     @staticmethod
