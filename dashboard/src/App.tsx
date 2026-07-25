@@ -282,6 +282,92 @@ const fmt = (value: number): string =>
     : value.toLocaleString('en-US', { maximumFractionDigits: 4 })
 
 // ---------------------------------------------------------------------------
+// Live price ticker (Binance futures websocket — display only; scoring and
+// candles stay closed-candle based)
+// ---------------------------------------------------------------------------
+function useLivePrice(symbol: Symbol_): {
+  price: number | null
+  change24h: number | null
+  tickDir: 'up' | 'down' | null
+} {
+  const [price, setPrice] = useState<number | null>(null)
+  const [change24h, setChange24h] = useState<number | null>(null)
+  const [tickDir, setTickDir] = useState<'up' | 'down' | null>(null)
+  const lastRef = useRef<number | null>(null)
+  const lastMsgAtRef = useRef(0)
+
+  useEffect(() => {
+    setPrice(null)
+    setChange24h(null)
+    setTickDir(null)
+    lastRef.current = null
+    lastMsgAtRef.current = 0
+
+    let ws: WebSocket | null = null
+    let retryTimer: number | undefined
+    let disposed = false
+
+    const applyTick = (last: number, changePct: number | null) => {
+      if (!Number.isFinite(last)) return
+      if (lastRef.current != null && last !== lastRef.current) {
+        setTickDir(last > lastRef.current ? 'up' : 'down')
+      }
+      lastRef.current = last
+      setPrice(last)
+      setChange24h(changePct)
+    }
+
+    const connect = () => {
+      ws = new WebSocket(
+        `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@miniTicker`,
+      )
+      ws.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(ev.data as string) as { c: string; o: string }
+          const last = parseFloat(m.c)
+          const open24 = parseFloat(m.o)
+          lastMsgAtRef.current = Date.now()
+          applyTick(last, open24 > 0 ? ((last - open24) / open24) * 100 : null)
+        } catch {
+          /* ignore malformed frames */
+        }
+      }
+      ws.onclose = () => {
+        if (!disposed) retryTimer = window.setTimeout(connect, 3000)
+      }
+      ws.onerror = () => ws?.close()
+    }
+    connect()
+
+    // REST fallback: if the websocket stays silent (blocked network,
+    // proxy, etc.), poll the backend ticker proxy every 3s instead.
+    const poll = window.setInterval(async () => {
+      if (Date.now() - lastMsgAtRef.current < 4000) return
+      try {
+        const resp = await axios.get<{ last: number | null; change_24h_pct: number | null }>(
+          `${API_BASE}/ticker/${symbol}`,
+          { timeout: 5000 },
+        )
+        if (typeof resp.data.last === 'number') {
+          applyTick(resp.data.last, resp.data.change_24h_pct)
+        }
+      } catch {
+        /* backend down — the score payload price remains as fallback */
+      }
+    }, 3000)
+
+    return () => {
+      disposed = true
+      window.clearTimeout(retryTimer)
+      window.clearInterval(poll)
+      ws?.close()
+    }
+  }, [symbol])
+
+  return { price, change24h, tickDir }
+}
+
+// ---------------------------------------------------------------------------
 // Chart
 // ---------------------------------------------------------------------------
 function PriceChart({
@@ -664,6 +750,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const live = useLivePrice(symbol)
   const [zoneVisibility, setZoneVisibility] = useState<ZoneVisibility>({
     fib: true,
     ob: true,
@@ -822,9 +909,37 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {data && (
-                <span className="font-mono text-sm font-semibold tabular-nums text-zinc-200">
-                  {fmt(data.price)}
+              {(live.price ?? data?.price) != null && (
+                <span className="flex items-center gap-2">
+                  {live.price != null && (
+                    <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest text-emerald-500">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                      Live
+                    </span>
+                  )}
+                  <span
+                    className={`font-mono text-sm font-semibold tabular-nums transition-colors ${
+                      live.tickDir === 'up'
+                        ? 'text-emerald-400'
+                        : live.tickDir === 'down'
+                          ? 'text-red-400'
+                          : 'text-zinc-200'
+                    }`}
+                  >
+                    {fmt((live.price ?? data?.price) as number)}
+                  </span>
+                  {live.change24h != null && (
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums ${
+                        live.change24h >= 0
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'bg-red-500/10 text-red-400'
+                      }`}
+                    >
+                      {live.change24h >= 0 ? '+' : ''}
+                      {live.change24h.toFixed(2)}% 24h
+                    </span>
+                  )}
                 </span>
               )}
             </div>

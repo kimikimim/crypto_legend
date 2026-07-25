@@ -189,6 +189,12 @@ def test_api_klines_rejects_bad_timeframe_and_symbol():
         assert client.get("/api/v1/klines/XRPUSDT?timeframe=5m").status_code == 400
 
 
+def test_api_ticker_rejects_non_whitelisted_symbol():
+    with TestClient(app) as client:
+        client.app.state.engine = MTFAnalysisEngine(fetcher=FakeFetcher())
+        assert client.get("/api/v1/ticker/XRPUSDT").status_code == 400
+
+
 def test_api_symbols_endpoint_lists_exactly_three():
     with TestClient(app) as client:
         resp = client.get("/api/v1/symbols")

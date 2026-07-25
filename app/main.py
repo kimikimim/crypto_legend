@@ -117,6 +117,30 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return to_response(result)
 
+    @app.get("/api/v1/ticker/{symbol}")
+    async def ticker(request: Request, symbol: str) -> dict:
+        """Live last price + 24h change (display only — scoring stays
+        closed-candle based). Used as fallback when the browser cannot
+        reach Binance's websocket directly."""
+        try:
+            unified = validate_symbol(symbol)
+        except (ValueError, UnsupportedSymbolError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        engine: MTFAnalysisEngine = request.app.state.engine
+        try:
+            t = await asyncio.to_thread(
+                engine.fetcher._exchange.fetch_ticker, unified  # noqa: SLF001
+            )
+        except ccxt.RateLimitExceeded as exc:
+            raise HTTPException(status_code=429, detail="Exchange rate limit hit") from exc
+        except (ccxt.NetworkError, Exception) as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "symbol": unified,
+            "last": t.get("last"),
+            "change_24h_pct": t.get("percentage"),
+        }
+
     @app.get("/api/v1/klines/{symbol}", response_model=KlinesResponse)
     async def klines(
         request: Request,
