@@ -46,6 +46,14 @@ interface BackendKline {
   close: number
 }
 
+interface StructureZone {
+  type: 'fib' | 'ob' | 'fvg'
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+  min_price: number
+  max_price: number
+  label: string
+}
+
 interface BackendResponse {
   symbol: string
   price: number
@@ -57,6 +65,7 @@ interface BackendResponse {
   long_plan: BackendPlan | null
   short_plan: BackendPlan | null
   klines: BackendKline[]
+  structure_zones: StructureZone[]
   evaluated_at: string
 }
 
@@ -85,6 +94,7 @@ interface SignalData {
   short_score: number
   active_plan: TradePlan
   klines: BackendKline[]
+  structure_zones: StructureZone[]
   evaluated_at: string
 }
 
@@ -134,7 +144,25 @@ function toSignalData(r: BackendResponse): SignalData {
     short_score: r.short_score,
     active_plan,
     klines: r.klines,
+    structure_zones: r.structure_zones ?? [],
     evaluated_at: r.evaluated_at,
+  }
+}
+
+/** Line styling for a structure zone's min/max boundary lines. */
+function zoneLineStyle(zone: StructureZone): {
+  color: string
+  lineStyle: LineStyle
+  axisLabelVisible: boolean
+} {
+  if (zone.type === 'fib') {
+    return { color: '#22d3ee', lineStyle: LineStyle.Dotted, axisLabelVisible: true }
+  }
+  return {
+    color:
+      zone.sentiment === 'bullish' ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)',
+    lineStyle: LineStyle.SparseDotted,
+    axisLabelVisible: false,
   }
 }
 
@@ -240,12 +268,37 @@ function PriceChart({ data }: { data: SignalData }) {
     barCountRef.current = data.klines.length
     applyDefaultRange()
 
-    // Redraw plan levels.
+    // Clear every previously drawn line (symbol switch / refresh).
     priceLinesRef.current.forEach((line) => series.removePriceLine(line))
     priceLinesRef.current = []
+
+    // Structure & fib zones: two boundary lines per zone.
+    for (const zone of data.structure_zones) {
+      const style = zoneLineStyle(zone)
+      priceLinesRef.current.push(
+        series.createPriceLine({
+          price: zone.max_price,
+          color: style.color,
+          lineStyle: style.lineStyle,
+          lineWidth: 1,
+          axisLabelVisible: style.axisLabelVisible,
+          title: zone.label,
+        }),
+        series.createPriceLine({
+          price: zone.min_price,
+          color: style.color,
+          lineStyle: style.lineStyle,
+          lineWidth: 1,
+          axisLabelVisible: style.axisLabelVisible,
+          title: '',
+        }),
+      )
+    }
+
+    // Execution levels on top.
     const plan = data.active_plan
     if (plan.direction !== 'NEUTRAL') {
-      priceLinesRef.current = [
+      priceLinesRef.current.push(
         series.createPriceLine({
           price: plan.sl,
           color: '#ef4444',
@@ -274,9 +327,9 @@ function PriceChart({ data }: { data: SignalData }) {
           lineWidth: 1,
           title: 'ENTRY',
         }),
-      ]
+      )
     }
-  }, [data])
+  }, [data, applyDefaultRange])
 
   return (
     <div className="relative h-full min-h-[420px]">

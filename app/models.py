@@ -122,6 +122,16 @@ class KlineModel(BaseModel):
     close: float
 
 
+class StructureZoneModel(BaseModel):
+    """Unified chart zone: fib confluence, order block, or fair value gap."""
+
+    type: str          # "fib" | "ob" | "fvg"
+    sentiment: str     # "bullish" | "bearish" | "neutral"
+    min_price: float
+    max_price: float
+    label: str
+
+
 class TradePlanModel(BaseModel):
     side: str
     entry_zone: EntryZoneModel
@@ -160,6 +170,41 @@ class ScoreResponse(BaseModel):
     fib_levels_1h: list[FibLevelModel]
     smart_money: SmartMoneyModel
     klines: list[KlineModel]
+    structure_zones: list[StructureZoneModel]
+
+
+def _structure_zones(result: AnalysisResult) -> list[StructureZoneModel]:
+    zones: list[StructureZoneModel] = [
+        StructureZoneModel(
+            type="fib",
+            sentiment="neutral",
+            min_price=z.low,
+            max_price=z.high,
+            label=f"FIB {' x '.join(z.sources)}",
+        )
+        for z in result.zones
+    ]
+    zones += [
+        StructureZoneModel(
+            type="ob",
+            sentiment=ob.side,
+            min_price=ob.low,
+            max_price=ob.high,
+            label=f"OB {ob.timeframe} {ob.side}",
+        )
+        for ob in result.smart_money.order_blocks
+    ]
+    zones += [
+        StructureZoneModel(
+            type="fvg",
+            sentiment=g.side,
+            min_price=g.low,
+            max_price=g.high,
+            label=f"FVG {g.timeframe} {g.side}",
+        )
+        for g in result.smart_money.fvgs
+    ]
+    return zones
 
 
 def _category(c: CategoryScore) -> CategoryScoreModel:
@@ -218,6 +263,7 @@ def to_response(result: AnalysisResult) -> ScoreResponse:
         long_plan=_plan(result.long_plan),
         short_plan=_plan(result.short_plan),
         klines=[KlineModel(**k) for k in result.klines],
+        structure_zones=_structure_zones(result),
         long_breakdown=_direction(result.scores.long),
         short_breakdown=_direction(result.scores.short),
         confluence_zones=[
