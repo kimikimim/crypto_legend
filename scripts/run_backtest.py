@@ -27,11 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.analysis import (  # noqa: E402
     barrier_mix,
     breakdown,
+    category_ablation,
     performance,
     score_calibration,
 )
 from app.backtest import TripleBarrierLabeler  # noqa: E402
-from app.config import ALLOWED_SYMBOLS  # noqa: E402
+from app.config import ALLOWED_SYMBOLS, DEFAULT_CONFIG  # noqa: E402
 from app.replay import Replayer  # noqa: E402
 from app.store import OHLCVStore  # noqa: E402
 
@@ -57,6 +58,9 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # The engine logs per scored bar; at ~100k bars that dominates runtime.
+    for noisy in ("app.engine", "app.scoring", "app.risk", "app.smc", "app.fibonacci"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     store = OHLCVStore()
@@ -64,6 +68,7 @@ def main() -> None:
     labeler = TripleBarrierLabeler()
     start = pd.Timestamp(args.start, tz="UTC") if args.start else None
     end = pd.Timestamp(args.end, tz="UTC") if args.end else None
+    warmup_days = DEFAULT_CONFIG.regime_min_candles
 
     all_signals, all_trades = [], []
     for symbol in args.symbols:
@@ -79,8 +84,18 @@ def main() -> None:
             signals = pd.read_parquet(sig_path)
             print(f"\n=== {symbol}: reusing {len(signals)} cached signals ===")
         else:
-            print(f"\n=== {symbol}: replaying {len(m15):,} 15m bars ===")
-            signals = replayer.run(symbol, m15, start=start, end=end, stride=args.stride)
+            # The 1D regime filter needs regime_min_candles of daily history;
+            # before that every bar would silently score as "chop" and lose
+            # the -20 counter-trend penalty, quietly changing the system.
+            earliest = m15.index[0] + pd.Timedelta(days=warmup_days)
+            run_start = max(start, earliest) if start is not None else earliest
+            print(
+                f"\n=== {symbol}: replaying from {run_start.date()} "
+                f"({len(m15):,} bars stored, {warmup_days}d regime warm-up skipped) ==="
+            )
+            signals = replayer.run(
+                symbol, m15, start=run_start, end=end, stride=args.stride
+            )
             if signals.empty:
                 print("   no bars scored (insufficient history?)")
                 continue
@@ -129,6 +144,11 @@ def main() -> None:
     for note in calib.notes:
         print(f"  note: {note}")
     print(f"\n  >>> {calib.verdict}")
+
+    print("\n" + "=" * 78)
+    print("CATEGORY ABLATION  (which parts of the score earn their weight)")
+    print("=" * 78)
+    _print_table("Outcome vs category points", category_ablation(trades))
 
     _print_table("By regime", breakdown(trades, "regime"))
     _print_table("By symbol", breakdown(trades, "symbol"))

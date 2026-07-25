@@ -10,6 +10,7 @@ from app.analysis import (
     baseline_comparison,
     barrier_mix,
     breakdown,
+    category_ablation,
     performance,
     score_calibration,
 )
@@ -143,6 +144,45 @@ def test_breakdown_on_missing_column_is_empty():
 def test_barrier_mix_shares_sum_to_one():
     mix = barrier_mix(make_trades([1.0, 1.0, -1.0, -1.0]))
     assert mix["share"].sum() == pytest.approx(1.0)
+
+
+# ----------------------------------------------------------------------
+# Category ablation
+# ----------------------------------------------------------------------
+def test_ablation_separates_an_informative_category_from_a_useless_one():
+    rng = np.random.default_rng(0)
+    n = 400
+    useful = rng.uniform(0, 25, n)          # drives the outcome
+    useless = rng.uniform(0, 15, n)         # independent of it (rho ~ -0.03)
+    r = (useful - 12.5) / 8 + rng.normal(0, 0.4, n)
+
+    trades = make_trades(list(r))
+    trades["cat_location"] = useful
+    trades["cat_momentum"] = useless
+
+    table = category_ablation(trades).set_index("category")
+    assert table.loc["location", "informative"]
+    assert table.loc["location", "gap_r"] > 0
+    # A single p-value can flag noise by chance (that is what 5% means), so
+    # assert the robust property: the real driver separates far more strongly.
+    assert table.loc["location", "spearman_rho"] > 0.5
+    assert abs(table.loc["momentum", "spearman_rho"]) < 0.2
+    assert table.loc["location", "gap_r"] > 5 * abs(table.loc["momentum", "gap_r"])
+
+
+def test_ablation_flags_a_constant_category():
+    """Whale points are always zero in replay — that must be reported as
+    'no variation', not silently as 'uninformative'."""
+    trades = make_trades([1.0, -1.0] * 30)
+    trades["cat_whale"] = 0.0
+    row = category_ablation(trades).set_index("category").loc["whale"]
+    assert not row["informative"]
+    assert "constant" in row["note"]
+
+
+def test_ablation_skips_missing_categories():
+    table = category_ablation(make_trades([1.0, -1.0] * 10))
+    assert table.empty  # no cat_* columns present at all
 
 
 # ----------------------------------------------------------------------

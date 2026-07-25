@@ -171,6 +171,70 @@ def score_calibration(
     )
 
 
+SCORE_CATEGORIES = ("trend", "location", "whale", "momentum", "volatility")
+
+
+def category_ablation(trades: pd.DataFrame) -> pd.DataFrame:
+    """Which scoring categories actually carry information?
+
+    For each category, compare outcomes when it scored high against when it
+    scored low. A category whose high and low halves perform the same is
+    contributing noise and a share of the weight budget it has not earned —
+    the honest response is to cut it, not to re-tune it.
+    """
+    if trades.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for cat in SCORE_CATEGORIES:
+        col = f"cat_{cat}"
+        if col not in trades.columns or trades[col].isna().all():
+            continue
+        values = trades[col].astype(float)
+        if values.nunique() < 2:
+            rows.append(
+                {
+                    "category": cat,
+                    "trades": len(trades),
+                    "spearman_rho": 0.0,
+                    "p_value": 1.0,
+                    "low_expectancy_r": np.nan,
+                    "high_expectancy_r": np.nan,
+                    "gap_r": np.nan,
+                    "informative": False,
+                    "note": "constant — no variation to learn from",
+                }
+            )
+            continue
+
+        rho, p_value = stats.spearmanr(values, trades["r_multiple"])
+        median = values.median()
+        low = trades[values <= median]
+        high = trades[values > median]
+        low_e = performance(low).expectancy_r if len(low) else np.nan
+        high_e = performance(high).expectancy_r if len(high) else np.nan
+        rows.append(
+            {
+                "category": cat,
+                "trades": len(trades),
+                "spearman_rho": round(float(rho), 3) if not np.isnan(rho) else 0.0,
+                "p_value": round(float(p_value), 4) if not np.isnan(p_value) else 1.0,
+                "low_expectancy_r": round(low_e, 3) if not np.isnan(low_e) else np.nan,
+                "high_expectancy_r": round(high_e, 3) if not np.isnan(high_e) else np.nan,
+                "gap_r": (
+                    round(high_e - low_e, 3)
+                    if not (np.isnan(high_e) or np.isnan(low_e))
+                    else np.nan
+                ),
+                "informative": bool(
+                    not np.isnan(p_value) and p_value < 0.05 and rho > 0
+                ),
+                "note": "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def breakdown(trades: pd.DataFrame, by: str) -> pd.DataFrame:
     """Performance grouped by a column (regime, symbol, side, sl_basis).
 

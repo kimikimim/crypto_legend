@@ -161,6 +161,15 @@ class TripleBarrierLabeler:
                     "rr_tp1_net": sig.get("rr_tp1_net"),
                     "sl_basis": sig.get("sl_basis"),
                     "risk_weight": sig.get("risk_weight"),
+                    # Carry the winning side's category points so each can be
+                    # tested for information on its own, without a re-replay.
+                    **{
+                        f"cat_{cat}": sig.get(f"{sig['side']}_{cat}")
+                        for cat in (
+                            "trend", "location", "whale",
+                            "momentum", "volatility", "penalty",
+                        )
+                    },
                     **outcome,
                 }
             )
