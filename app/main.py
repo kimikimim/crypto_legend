@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 import ccxt
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 
 from app import __version__
 from app.config import ALLOWED_SYMBOLS
@@ -63,6 +64,10 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="/docs")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

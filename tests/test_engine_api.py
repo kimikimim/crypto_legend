@@ -162,3 +162,10 @@ def test_api_symbols_endpoint_lists_exactly_three():
 def test_api_health():
     with TestClient(app) as client:
         assert client.get("/health").json()["status"] == "ok"
+
+
+def test_api_root_redirects_to_docs():
+    with TestClient(app) as client:
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/docs"
