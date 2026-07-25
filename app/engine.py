@@ -26,7 +26,13 @@ from app.liquidations import (
     proxy_liquidation_signal,
 )
 from app.mtf import merge_mtf
-from app.risk import REGIME_CHOP, TradePlan, TradePlanner, determine_regime
+from app.risk import (
+    REGIME_CHOP,
+    TradePlan,
+    TradePlanner,
+    decide_verdict,
+    determine_regime,
+)
 from app.scoring import ScoreResult, ScoringContext, ScoringEngine
 from app.smc import (
     FairValueGap,
@@ -89,14 +95,22 @@ class AnalysisResult:
     klines: list[dict]                # recent 15m candles for charting
     atr_15m: float | None             # current 15m ATR (for UI zone filtering)
     swing_levels: list[SwingLevel]    # major 4h/1h S/R swing levels
+    verdict: str                      # "LONG" | "SHORT" | "NEUTRAL"
+    verdict_reasons: tuple[str, ...]  # why NEUTRAL, when it is
 
     @property
     def primary_direction(self) -> str:
+        """Higher-scoring side, regardless of tradeability (display ordering)."""
         return "long" if self.scores.long.total >= self.scores.short.total else "short"
 
     @property
     def primary_plan(self) -> TradePlan | None:
-        return self.long_plan if self.primary_direction == "long" else self.short_plan
+        """The plan actually being recommended, or None when NEUTRAL."""
+        if self.verdict == "LONG":
+            return self.long_plan
+        if self.verdict == "SHORT":
+            return self.short_plan
+        return None
 
 
 class MTFAnalysisEngine:
@@ -211,6 +225,10 @@ class MTFAnalysisEngine:
         )
         long_plan = self.planner.plan("long", **plan_args)
         short_plan = self.planner.plan("short", **plan_args)
+        verdict, verdict_reasons = decide_verdict(
+            scores.long.total, long_plan, scores.short.total, short_plan, self.cfg
+        )
+        logger.info("Verdict for %s: %s", unified, verdict)
 
         return AnalysisResult(
             symbol=unified,
@@ -239,6 +257,8 @@ class MTFAnalysisEngine:
                 float(row["atr"]) if pd.notna(row["atr"]) and row["atr"] > 0 else None
             ),
             swing_levels=swing_levels,
+            verdict=verdict,
+            verdict_reasons=verdict_reasons,
         )
 
     @staticmethod

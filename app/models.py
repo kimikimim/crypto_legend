@@ -147,7 +147,10 @@ class TradePlanModel(BaseModel):
     risk_weight: float = Field(ge=0, le=1)
     suggested_leverage: float
     rr_tp1: float
+    rr_tp1_net: float
     sl_basis: str
+    tradeable: bool
+    reject_reasons: list[str]
 
 
 class ScoreResponse(BaseModel):
@@ -157,9 +160,11 @@ class ScoreResponse(BaseModel):
     use_closed_candle: bool
     long_score: float = Field(ge=0, le=100)
     short_score: float = Field(ge=0, le=100)
-    # --- headline risk fields (from the higher-scoring direction) ---
+    # --- headline risk fields (from the recommended direction) ---
     is_squeeze_warning: bool
     regime: str
+    verdict: str                  # "LONG" | "SHORT" | "NEUTRAL"
+    verdict_reasons: list[str]    # why NEUTRAL, when it is
     primary_direction: str
     entry_zone: EntryZoneModel | None
     suggested_sl: float | None
@@ -257,7 +262,10 @@ def _plan(p: TradePlan | None) -> TradePlanModel | None:
         risk_weight=p.risk_weight,
         suggested_leverage=p.suggested_leverage,
         rr_tp1=p.rr_tp1,
+        rr_tp1_net=p.rr_tp1_net,
         sl_basis=p.sl_basis,
+        tradeable=p.tradeable,
+        reject_reasons=list(p.reject_reasons),
     )
 
 
@@ -273,6 +281,8 @@ def to_response(result: AnalysisResult) -> ScoreResponse:
         short_score=result.scores.short.total,
         is_squeeze_warning=sm.squeeze.active,
         regime=result.regime,
+        verdict=result.verdict,
+        verdict_reasons=list(result.verdict_reasons),
         primary_direction=result.primary_direction,
         entry_zone=primary.entry_zone if primary else None,
         suggested_sl=primary.suggested_sl if primary else None,

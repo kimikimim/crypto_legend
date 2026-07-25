@@ -41,8 +41,50 @@ class TradePlan:
     suggested_tp2: float
     risk_weight: float            # 0-1: fraction of the max allowed size
     suggested_leverage: float     # position notional / equity, capped
-    rr_tp1: float                 # reward:risk at TP1
+    rr_tp1: float                 # gross reward:risk at TP1
+    rr_tp1_net: float             # after round-trip fees + slippage
     sl_basis: str                 # which structure anchored the stop
+    tradeable: bool               # cleared the net-RR gate
+    reject_reasons: tuple[str, ...] = ()
+
+
+def decide_verdict(
+    long_score: float,
+    long_plan: TradePlan | None,
+    short_score: float,
+    short_plan: TradePlan | None,
+    config: EngineConfig = DEFAULT_CONFIG,
+) -> tuple[str, tuple[str, ...]]:
+    """Final tradeable direction: "LONG", "SHORT", or "NEUTRAL".
+
+    Owned by the engine (not the UI) so a backtest and the live dashboard
+    reach the same decision through the same code path. A side qualifies only
+    if its score clears `min_score` AND its plan clears the net-RR gate; the
+    higher-scoring qualifying side wins.
+    """
+    qualified: list[tuple[float, str]] = []
+    notes: list[str] = []
+    for side, score, plan in (
+        ("LONG", long_score, long_plan),
+        ("SHORT", short_score, short_plan),
+    ):
+        if score < config.min_score:
+            notes.append(
+                f"{side} score {score:.1f} below {config.min_score:.0f} threshold"
+            )
+            continue
+        if plan is None:
+            notes.append(f"{side} has no computable trade plan")
+            continue
+        if not plan.tradeable:
+            notes.extend(f"{side}: {reason}" for reason in plan.reject_reasons)
+            continue
+        qualified.append((score, side))
+
+    if not qualified:
+        return "NEUTRAL", tuple(notes)
+    qualified.sort(reverse=True)
+    return qualified[0][1], ()
 
 
 def determine_regime(df_1d: pd.DataFrame, config: EngineConfig = DEFAULT_CONFIG) -> str:
@@ -105,11 +147,28 @@ class TradePlanner:
         )
         sl, tp1, tp2 = self._enforce_ordering(is_long, close, atr, sl, tp1, tp2)
 
-        risk_frac = abs(close - sl) / close
+        # Round-trip fees + slippage, in price terms. Every reward/risk figure
+        # below is net of this: a stop 0.3% wide against 0.14% of costs is
+        # nearly half cost, and gross RR would badly misrepresent the trade.
+        cost = close * self.cfg.round_trip_cost_pct / 100.0
+        risk_abs = abs(close - sl)
+        reward_abs = abs(tp1 - close)
+
+        risk_frac = (risk_abs + cost) / close
         account_risk = self.cfg.account_risk_pct / 100.0
         leverage = min(self.cfg.max_leverage, account_risk / risk_frac)
         risk_weight = round(leverage / self.cfg.max_leverage, 3)
-        rr_tp1 = abs(tp1 - close) / abs(close - sl)
+
+        rr_tp1 = reward_abs / risk_abs
+        rr_tp1_net = (reward_abs - cost) / (risk_abs + cost)
+
+        reject_reasons: list[str] = []
+        if rr_tp1_net < self.cfg.min_rr_tp1:
+            reject_reasons.append(
+                f"net RR at TP1 {rr_tp1_net:.2f} < required {self.cfg.min_rr_tp1:.2f} "
+                f"(gross {rr_tp1:.2f}, round-trip cost "
+                f"{self.cfg.round_trip_cost_pct:.2f}% of notional)"
+            )
 
         return TradePlan(
             side=side,
@@ -119,9 +178,14 @@ class TradePlanner:
             suggested_tp1=round(tp1, 8),
             suggested_tp2=round(tp2, 8),
             risk_weight=risk_weight,
-            suggested_leverage=round(leverage, 2),
+            # 3 decimals: rounding to 2 skews the risk budget by several
+            # percent when a wide stop drives leverage below ~0.2x.
+            suggested_leverage=round(leverage, 3),
             rr_tp1=round(rr_tp1, 2),
+            rr_tp1_net=round(rr_tp1_net, 2),
             sl_basis=sl_basis,
+            tradeable=not reject_reasons,
+            reject_reasons=tuple(reject_reasons),
         )
 
     # ------------------------------------------------------------------

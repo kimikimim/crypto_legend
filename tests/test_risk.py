@@ -7,11 +7,13 @@ import pandas as pd
 import pytest
 
 from app.fibonacci import FibLevel, SwingLeg
+from app.config import EngineConfig
 from app.risk import (
     REGIME_BEAR,
     REGIME_BULL,
     REGIME_CHOP,
     TradePlanner,
+    decide_verdict,
     determine_regime,
 )
 from app.scoring import ScoringContext, ScoringEngine
@@ -180,18 +182,130 @@ def test_leverage_capped_and_risk_weight_bounded(planner, m15, config):
         assert 0.0 < plan.suggested_leverage <= config.max_leverage
 
 
-def test_constant_account_risk_math(planner, m15, config):
-    plan = _plan(planner, m15)  # SL 98.5 -> risk 1.5%
-    expected_leverage = min(
-        config.max_leverage, (config.account_risk_pct / 100.0) / (1.5 / 100.0)
-    )
-    assert plan.suggested_leverage == pytest.approx(expected_leverage, abs=0.01)
-    assert plan.risk_weight == pytest.approx(
-        expected_leverage / config.max_leverage, abs=0.01
-    )
+def test_realized_risk_equals_the_account_limit(planner, m15, config):
+    """The invariant that matters: leverage x stop distance (incl. costs)
+    always lands on the configured account risk, whatever the stop width."""
+    for overrides in (
+        {},
+        {"sweeps": [LiquiditySweep(99.0, "1h", "low", m15.index[-1])]},
+        {"swing_levels": [SwingLevel(92.0, "low", "1h", T0)]},
+    ):
+        plan = _plan(planner, m15, **overrides)
+        price = 100.0
+        cost = price * config.round_trip_cost_pct / 100.0
+        stop_frac = (abs(price - plan.suggested_sl) + cost) / price
+        realized_risk_pct = plan.suggested_leverage * stop_frac * 100.0
+        assert realized_risk_pct == pytest.approx(config.account_risk_pct, abs=0.02)
+        assert plan.risk_weight == pytest.approx(
+            plan.suggested_leverage / config.max_leverage, abs=0.01
+        )
 
 
 def test_plan_none_when_atr_unusable(planner, m15):
     broken = m15.copy()
     broken["atr"] = float("nan")
     assert _plan(planner, broken) is None
+
+
+# ----------------------------------------------------------------------
+# Cost model & net-RR gate
+# ----------------------------------------------------------------------
+def test_net_rr_is_gross_rr_minus_round_trip_costs(planner, m15, config):
+    # SL 98.5 (risk 1.5), TP1 forced to the 2x ATR fallback -> 102.0 (reward 2.0).
+    plan = _plan(planner, m15)
+    cost = 100.0 * config.round_trip_cost_pct / 100.0
+    assert plan.rr_tp1 == pytest.approx(2.0 / 1.5, abs=0.01)
+    assert plan.rr_tp1_net == pytest.approx((2.0 - cost) / (1.5 + cost), abs=0.01)
+    assert plan.rr_tp1_net < plan.rr_tp1  # costs always hurt
+
+
+def test_thin_reward_setup_is_rejected(planner, m15):
+    # TP1 barely above price: gross RR ~0.13 -> nowhere near the 1.5 gate.
+    plan = _plan(planner, m15, levels=[FibLevel(100.6, 0.382, "1h")])
+    assert plan.tradeable is False
+    assert plan.reject_reasons
+    assert "net RR at TP1" in plan.reject_reasons[0]
+
+
+def test_generous_reward_setup_is_tradeable(planner, m15):
+    plan = _plan(planner, m15, levels=[FibLevel(105.0, 0.382, "1h")])
+    assert plan.tradeable is True
+    assert plan.reject_reasons == ()
+    assert plan.rr_tp1_net >= 1.5
+
+
+def test_sizing_accounts_for_costs(planner, m15, config):
+    plan = _plan(planner, m15)  # SL 1.5 wide on a 100 price
+    cost = 100.0 * config.round_trip_cost_pct / 100.0
+    expected_lev = min(
+        config.max_leverage,
+        (config.account_risk_pct / 100.0) / ((1.5 + cost) / 100.0),
+    )
+    assert plan.suggested_leverage == pytest.approx(expected_lev, abs=0.01)
+
+
+def test_zero_cost_config_makes_net_equal_gross(m15):
+    free = EngineConfig(taker_fee_pct=0.0, slippage_pct=0.0)
+    plan = _plan(TradePlanner(free), m15)
+    assert plan.rr_tp1_net == pytest.approx(plan.rr_tp1, abs=0.01)
+
+
+# ----------------------------------------------------------------------
+# Verdict: score threshold AND net-RR gate, one shared decision path
+# ----------------------------------------------------------------------
+def _fake_plan(side: str, tradeable: bool, reasons: tuple[str, ...] = ()):
+    from app.risk import TradePlan
+
+    return TradePlan(
+        side=side, entry_zone_low=99.0, entry_zone_high=100.0,
+        suggested_sl=98.0, suggested_tp1=103.0, suggested_tp2=106.0,
+        risk_weight=0.5, suggested_leverage=2.5, rr_tp1=2.5,
+        rr_tp1_net=2.2 if tradeable else 0.3, sl_basis="sweep_wick",
+        tradeable=tradeable, reject_reasons=reasons,
+    )
+
+
+def test_verdict_long_when_score_and_rr_both_pass(config):
+    verdict, reasons = decide_verdict(
+        70.0, _fake_plan("long", True), 20.0, _fake_plan("short", True), config
+    )
+    assert verdict == "LONG"
+    assert reasons == ()
+
+
+def test_verdict_neutral_below_score_threshold(config):
+    verdict, reasons = decide_verdict(
+        16.0, _fake_plan("long", True), 12.0, _fake_plan("short", True), config
+    )
+    assert verdict == "NEUTRAL"
+    assert any("below 40 threshold" in r for r in reasons)
+
+
+def test_verdict_neutral_when_rr_gate_fails_despite_high_score(config):
+    verdict, reasons = decide_verdict(
+        85.0,
+        _fake_plan("long", False, ("net RR at TP1 0.30 < required 1.50",)),
+        10.0,
+        _fake_plan("short", True),
+        config,
+    )
+    assert verdict == "NEUTRAL"
+    assert any("net RR" in r for r in reasons)
+
+
+def test_verdict_falls_to_other_side_when_top_side_is_untradeable(config):
+    # Long scores higher but fails the RR gate; short qualifies outright.
+    verdict, _ = decide_verdict(
+        75.0,
+        _fake_plan("long", False, ("net RR at TP1 0.20 < required 1.50",)),
+        60.0,
+        _fake_plan("short", True),
+        config,
+    )
+    assert verdict == "SHORT"
+
+
+def test_verdict_neutral_when_plan_missing(config):
+    verdict, reasons = decide_verdict(90.0, None, 88.0, None, config)
+    assert verdict == "NEUTRAL"
+    assert all("no computable trade plan" in r for r in reasons)

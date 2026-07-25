@@ -35,7 +35,10 @@ interface BackendPlan {
   risk_weight: number
   suggested_leverage: number
   rr_tp1: number
+  rr_tp1_net: number
   sl_basis: string
+  tradeable: boolean
+  reject_reasons: string[]
 }
 
 interface BackendKline {
@@ -59,6 +62,8 @@ interface BackendResponse {
   price: number
   regime: 'bull' | 'bear' | 'chop'
   is_squeeze_warning: boolean
+  verdict: 'LONG' | 'SHORT' | 'NEUTRAL'
+  verdict_reasons: string[]
   primary_direction: 'long' | 'short'
   long_score: number
   short_score: number
@@ -83,7 +88,9 @@ interface TradePlan {
   tp2: number
   leverage: number
   risk_weight: number
+  rr_net: number
   sl_basis: string
+  reject_reasons: string[]
 }
 
 interface SignalData {
@@ -126,23 +133,23 @@ const NEUTRAL_PLAN: TradePlan = {
   tp2: 0,
   leverage: 0,
   risk_weight: 0,
+  rr_net: 0,
   sl_basis: '',
+  reject_reasons: [],
 }
-
-/** Below this score the engine's edge is too weak to act on. */
-const NEUTRAL_THRESHOLD = 40
 
 function toSignalData(r: BackendResponse): SignalData {
   const bestScore = Math.max(r.long_score, r.short_score)
-  const side = r.primary_direction
-  const plan = side === 'long' ? r.long_plan : r.short_plan
+  // The engine owns the verdict (score threshold + net-RR gate) so the
+  // dashboard and any backtest agree on what counts as a trade.
+  const plan = r.verdict === 'LONG' ? r.long_plan : r.verdict === 'SHORT' ? r.short_plan : null
 
   const active_plan: TradePlan =
-    bestScore < NEUTRAL_THRESHOLD || !plan
-      ? { ...NEUTRAL_PLAN, score: bestScore }
+    !plan || r.verdict === 'NEUTRAL'
+      ? { ...NEUTRAL_PLAN, score: bestScore, reject_reasons: r.verdict_reasons ?? [] }
       : {
-          direction: side === 'long' ? 'LONG' : 'SHORT',
-          score: side === 'long' ? r.long_score : r.short_score,
+          direction: r.verdict,
+          score: plan.side === 'long' ? r.long_score : r.short_score,
           entry_price: (plan.entry_zone.low + plan.entry_zone.high) / 2,
           entry_zone: plan.entry_zone,
           sl: plan.suggested_sl,
@@ -150,7 +157,9 @@ function toSignalData(r: BackendResponse): SignalData {
           tp2: plan.suggested_tp2,
           leverage: plan.suggested_leverage,
           risk_weight: plan.risk_weight,
+          rr_net: plan.rr_tp1_net,
           sl_basis: plan.sl_basis,
+          reject_reasons: [],
         }
 
   return {
@@ -660,12 +669,17 @@ function Row({ label, value, accent }: { label: string; value: string; accent?: 
 function PlanPanel({ plan }: { plan: TradePlan }) {
   if (plan.direction === 'NEUTRAL') {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-zinc-700 bg-zinc-900/40 px-4 py-8 text-center">
+      <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-zinc-700 bg-zinc-900/40 px-4 py-6 text-center">
         <ShieldCheck size={22} className="text-zinc-500" />
         <p className="text-sm font-medium text-zinc-300">No active high-probability setup</p>
-        <p className="text-xs text-zinc-500">
-          Best score {plan.score.toFixed(1)} &lt; {NEUTRAL_THRESHOLD} threshold — standing aside.
-        </p>
+        <p className="text-xs text-zinc-500">Best score {plan.score.toFixed(1)} — standing aside.</p>
+        {plan.reject_reasons.length > 0 && (
+          <ul className="mt-1 space-y-1 text-left text-[11px] leading-snug text-zinc-600">
+            {plan.reject_reasons.map((reason) => (
+              <li key={reason}>· {reason}</li>
+            ))}
+          </ul>
+        )}
       </div>
     )
   }
@@ -709,6 +723,11 @@ function PlanPanel({ plan }: { plan: TradePlan }) {
         <Row label="Stop loss" value={fmt(plan.sl)} accent="text-red-400" />
         <Row label="Take profit 1" value={fmt(plan.tp1)} accent="text-emerald-400" />
         <Row label="Take profit 2" value={fmt(plan.tp2)} accent="text-emerald-600" />
+        <Row
+          label="Net RR (TP1)"
+          value={`${plan.rr_net.toFixed(2)} : 1`}
+          accent={plan.rr_net >= 2 ? 'text-emerald-400' : 'text-amber-300'}
+        />
         <Row label="SL basis" value={plan.sl_basis.replace('_', ' ')} accent="text-zinc-400" />
       </div>
 

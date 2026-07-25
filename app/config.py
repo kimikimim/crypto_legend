@@ -137,5 +137,17 @@ class EngineConfig:
     account_risk_pct: float = 1.0   # % of equity risked per trade
     max_leverage: float = 5.0       # hard cap for suggested leverage
 
+    # --- execution costs (Binance USDT-M VIP0, market orders) ---
+    taker_fee_pct: float = 0.05     # per side
+    slippage_pct: float = 0.02      # assumed per side
+    # --- trade gating: the engine, not the UI, decides tradeability ---
+    min_rr_tp1: float = 1.5         # net of costs; below this the setup is skipped
+    min_score: float = 40.0         # below this the verdict is NEUTRAL
+
+    @property
+    def round_trip_cost_pct(self) -> float:
+        """Entry + exit fees and slippage, as a percentage of notional."""
+        return 2.0 * (self.taker_fee_pct + self.slippage_pct)
+
 
 DEFAULT_CONFIG = EngineConfig()

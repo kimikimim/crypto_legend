@@ -122,10 +122,23 @@ def test_api_score_endpoint_contract():
         assert isinstance(body["is_squeeze_warning"], bool)
         assert body["regime"] in ("bull", "bear", "chop")
         assert body["primary_direction"] in ("long", "short")
-        for key in ("entry_zone", "suggested_sl", "suggested_tp1",
-                    "suggested_tp2", "risk_weight"):
-            assert key in body and body[key] is not None
-        assert 0 <= body["risk_weight"] <= 1
+        assert body["verdict"] in ("LONG", "SHORT", "NEUTRAL")
+
+        # Headline plan fields are populated only when a trade is recommended;
+        # NEUTRAL must explain itself instead.
+        if body["verdict"] == "NEUTRAL":
+            assert body["suggested_sl"] is None
+            assert body["verdict_reasons"]
+        else:
+            for key in ("entry_zone", "suggested_sl", "suggested_tp1",
+                        "suggested_tp2", "risk_weight"):
+                assert body[key] is not None
+            assert 0 <= body["risk_weight"] <= 1
+
+        for side in ("long_plan", "short_plan"):
+            plan = body[side]
+            assert plan["rr_tp1_net"] <= plan["rr_tp1"]   # costs never help
+            assert isinstance(plan["tradeable"], bool)
 
         # Smart-money weights: 20 / 25 / 25 / 15 / 15.
         for side in ("long_breakdown", "short_breakdown"):
