@@ -20,8 +20,10 @@ class FakeFetcher:
         self.periods = periods
 
     def fetch_ohlcv(self, symbol, timeframe, limit=500):
-        freq = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}[timeframe]
-        period = {"15m": 96, "1h": 60, "4h": 40, "1d": 50}[timeframe]
+        freq = {"1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min",
+                "1h": "1h", "4h": "4h", "1d": "1D"}[timeframe]
+        period = {"1m": 60, "3m": 60, "5m": 60, "15m": 96,
+                  "1h": 60, "4h": 40, "1d": 50}[timeframe]
         return make_ohlcv(
             zigzag_closes(self.periods, base=100, amp=15, period=period), freq
         )
@@ -165,6 +167,26 @@ def test_api_rejects_non_whitelisted_symbol_with_400():
         resp = client.get("/api/v1/score/XRPUSDT")
         assert resp.status_code == 400
         assert "restricted" in resp.json()["detail"]
+
+
+def test_api_klines_endpoint_serves_chart_timeframes():
+    with TestClient(app) as client:
+        client.app.state.engine = MTFAnalysisEngine(fetcher=FakeFetcher())
+        for tf in ("1m", "3m", "5m", "15m", "1h", "4h", "1d"):
+            resp = client.get(f"/api/v1/klines/BTCUSDT?timeframe={tf}")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["symbol"] == "BTC/USDT:USDT"
+            assert body["timeframe"] == tf
+            assert len(body["klines"]) > 0
+            assert set(body["klines"][0]) == {"time", "open", "high", "low", "close"}
+
+
+def test_api_klines_rejects_bad_timeframe_and_symbol():
+    with TestClient(app) as client:
+        client.app.state.engine = MTFAnalysisEngine(fetcher=FakeFetcher())
+        assert client.get("/api/v1/klines/BTCUSDT?timeframe=2h").status_code == 400
+        assert client.get("/api/v1/klines/XRPUSDT?timeframe=5m").status_code == 400
 
 
 def test_api_symbols_endpoint_lists_exactly_three():

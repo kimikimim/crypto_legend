@@ -16,9 +16,16 @@ TF_DELTA: dict[str, pd.Timedelta] = {
     "4h": pd.Timedelta(hours=4),
     "1h": pd.Timedelta(hours=1),
     "15m": pd.Timedelta(minutes=15),
+    "5m": pd.Timedelta(minutes=5),
+    "3m": pd.Timedelta(minutes=3),
+    "1m": pd.Timedelta(minutes=1),
 }
 
+# Timeframes the scoring engine analyzes (fixed).
 TIMEFRAMES: tuple[str, ...] = ("4h", "1h", "15m")
+
+# Timeframes the chart/klines endpoint may serve.
+CHART_TIMEFRAMES: tuple[str, ...] = ("1m", "3m", "5m", "15m", "1h", "4h", "1d")
 
 # Hard whitelist: the engine fetches and scores ONLY these three pairs.
 # Never expand this to full-market scanning.

@@ -122,6 +122,12 @@ class KlineModel(BaseModel):
     close: float
 
 
+class KlinesResponse(BaseModel):
+    symbol: str
+    timeframe: str
+    klines: list[KlineModel]
+
+
 class StructureZoneModel(BaseModel):
     """Unified chart zone: fib confluence, order block, or fair value gap."""
 

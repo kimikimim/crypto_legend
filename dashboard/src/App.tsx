@@ -270,6 +270,9 @@ class ZoneBandsPrimitive {
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] as const
 type Symbol_ = (typeof SYMBOLS)[number]
 
+const CHART_TFS = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'] as const
+type ChartTf = (typeof CHART_TFS)[number]
+
 const API_BASE = 'http://localhost:8000/api/v1'
 const REFRESH_MS = 60_000
 
@@ -281,7 +284,15 @@ const fmt = (value: number): string =>
 // ---------------------------------------------------------------------------
 // Chart
 // ---------------------------------------------------------------------------
-function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] }) {
+function PriceChart({
+  data,
+  klines,
+  zones,
+}: {
+  data: SignalData
+  klines: BackendKline[]
+  zones: StructureZone[]
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -361,7 +372,7 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
     if (!series) return
 
     series.setData(
-      data.klines.map((k) => ({
+      klines.map((k) => ({
         time: Math.floor(Date.parse(k.time) / 1000) as UTCTimestamp,
         open: k.open,
         high: k.high,
@@ -369,7 +380,7 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
         close: k.close,
       })),
     )
-    barCountRef.current = data.klines.length
+    barCountRef.current = klines.length
     applyDefaultRange()
 
     // Clear every previously drawn line (symbol switch / refresh).
@@ -440,7 +451,7 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
         }),
       )
     }
-  }, [data, zones, applyDefaultRange])
+  }, [data, klines, zones, applyDefaultRange])
 
   return (
     <div className="relative h-full min-h-[420px]">
@@ -647,7 +658,9 @@ function PlanPanel({ plan }: { plan: TradePlan }) {
 // ---------------------------------------------------------------------------
 export default function App() {
   const [symbol, setSymbol] = useState<Symbol_>('BTCUSDT')
+  const [chartTf, setChartTf] = useState<ChartTf>('15m')
   const [data, setData] = useState<SignalData | null>(null)
+  const [tfKlines, setTfKlines] = useState<BackendKline[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
@@ -700,6 +713,33 @@ export default function App() {
     const id = setInterval(() => void fetchSignal(symbol), REFRESH_MS)
     return () => clearInterval(id)
   }, [symbol, fetchSignal])
+
+  // Chart candles for non-15m timeframes (15m reuses the score payload).
+  const fetchTfKlines = useCallback(async (sym: Symbol_, tf: ChartTf) => {
+    if (tf === '15m') {
+      setTfKlines(null)
+      return
+    }
+    try {
+      const resp = await axios.get<{ klines: BackendKline[] }>(
+        `${API_BASE}/klines/${sym}`,
+        { params: { timeframe: tf }, timeout: 30_000 },
+      )
+      setTfKlines(resp.data.klines)
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.message : 'Unexpected error')
+    }
+  }, [])
+
+  useEffect(() => {
+    setTfKlines(null)
+    void fetchTfKlines(symbol, chartTf)
+    if (chartTf === '15m') return
+    const id = setInterval(() => void fetchTfKlines(symbol, chartTf), REFRESH_MS)
+    return () => clearInterval(id)
+  }, [symbol, chartTf, fetchTfKlines])
+
+  const chartKlines = chartTf === '15m' ? data?.klines ?? [] : tfKlines ?? []
 
   const header = useMemo(
     () => (
@@ -762,19 +802,36 @@ export default function App() {
               <span className="font-mono text-sm font-bold text-zinc-100">
                 {data?.symbol ?? symbol}
               </span>
-              <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-                15m · closed candles
+              <span className="hidden text-[10px] uppercase tracking-widest text-zinc-500 sm:inline">
+                closed candles
               </span>
             </div>
-            {data && (
-              <span className="font-mono text-sm font-semibold tabular-nums text-zinc-200">
-                {fmt(data.price)}
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              <div className="flex overflow-hidden rounded-md border border-zinc-800">
+                {CHART_TFS.map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setChartTf(tf)}
+                    className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors ${
+                      tf === chartTf
+                        ? 'bg-zinc-200 text-zinc-950'
+                        : 'bg-zinc-900 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+              {data && (
+                <span className="font-mono text-sm font-semibold tabular-nums text-zinc-200">
+                  {fmt(data.price)}
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex-1">
-            {data ? (
-              <PriceChart data={data} zones={visibleZones} />
+            {data && chartKlines.length > 0 ? (
+              <PriceChart data={data} klines={chartKlines} zones={visibleZones} />
             ) : (
               <div className="flex h-full min-h-[420px] items-center justify-center text-sm text-zinc-600">
                 {loading ? 'Loading market data…' : 'No data'}

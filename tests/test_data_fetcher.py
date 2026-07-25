@@ -93,7 +93,7 @@ def test_fetch_raises_after_retries_exhausted():
 def test_fetch_rejects_unknown_timeframe():
     fetcher = DataFetcher(exchange=FlakyExchange(failures=0))
     with pytest.raises(ValueError):
-        fetcher.fetch_ohlcv("BTCUSDT", "5m")
+        fetcher.fetch_ohlcv("BTCUSDT", "2h")
 
 
 # ----------------------------------------------------------------------

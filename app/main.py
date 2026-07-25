@@ -20,7 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app import __version__
-from app.config import ALLOWED_SYMBOLS
+from app.config import ALLOWED_SYMBOLS, CHART_TIMEFRAMES
+from app.data_fetcher import drop_open_candle, validate_symbol
 from app.engine import MTFAnalysisEngine
 from app.exceptions import (
     DataFetchError,
@@ -28,7 +29,7 @@ from app.exceptions import (
     UnsupportedSymbolError,
 )
 from app.liquidations import LiquidationCollector, LiquidationTracker
-from app.models import ScoreResponse, to_response
+from app.models import KlineModel, KlinesResponse, ScoreResponse, to_response
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +116,54 @@ def create_app() -> FastAPI:
         except (DataFetchError, ccxt.NetworkError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return to_response(result)
+
+    @app.get("/api/v1/klines/{symbol}", response_model=KlinesResponse)
+    async def klines(
+        request: Request,
+        symbol: str,
+        timeframe: str = Query("15m", description=f"One of: {', '.join(CHART_TIMEFRAMES)}"),
+        limit: int = Query(400, ge=50, le=1000),
+        use_closed_candle: bool = Query(True),
+    ) -> KlinesResponse:
+        """Chart-only candles for any supported timeframe (no scoring)."""
+        if timeframe not in CHART_TIMEFRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"timeframe must be one of {', '.join(CHART_TIMEFRAMES)}",
+            )
+        try:
+            unified = validate_symbol(symbol)
+        except (ValueError, UnsupportedSymbolError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        engine: MTFAnalysisEngine = request.app.state.engine
+
+        def _fetch():
+            df = engine.fetcher.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return drop_open_candle(df, timeframe) if use_closed_candle else df
+
+        try:
+            df = await asyncio.to_thread(_fetch)
+        except (ValueError, UnsupportedSymbolError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ccxt.RateLimitExceeded as exc:
+            raise HTTPException(status_code=429, detail="Exchange rate limit hit") from exc
+        except (DataFetchError, ccxt.NetworkError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        return KlinesResponse(
+            symbol=unified,
+            timeframe=timeframe,
+            klines=[
+                KlineModel(
+                    time=ts.isoformat(),
+                    open=float(r["open"]),
+                    high=float(r["high"]),
+                    low=float(r["low"]),
+                    close=float(r["close"]),
+                )
+                for ts, r in df.iterrows()
+            ],
+        )
 
     return app
 
