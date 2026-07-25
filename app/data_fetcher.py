@@ -92,6 +92,55 @@ class DataFetcher:
         """Fetch all requested timeframes for one symbol."""
         return {tf: self.fetch_ohlcv(symbol, tf, limit=limit) for tf in timeframes}
 
+    def fetch_ohlcv_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: pd.Timestamp,
+        until: pd.Timestamp | None = None,
+        page_limit: int = 1500,
+        on_page: Callable[[pd.Timestamp, int], None] | None = None,
+    ) -> pd.DataFrame:
+        """Paginate history from `since` to `until` (default: now).
+
+        Used to build the local backtest store; the exchange caps each
+        response at ~1500 candles, so long ranges need many round trips.
+        """
+        if timeframe not in TF_DELTA:
+            raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+        unified = validate_symbol(symbol)
+        until = until or pd.Timestamp.now(tz="UTC")
+        step = TF_DELTA[timeframe]
+
+        pages: list[pd.DataFrame] = []
+        cursor = since
+        while cursor < until:
+            since_ms = int(cursor.timestamp() * 1000)
+            raw = self._with_retries(
+                f"OHLCV {unified} {timeframe} from {cursor}",
+                lambda ms=since_ms: self._exchange.fetch_ohlcv(
+                    unified, timeframe=timeframe, since=ms, limit=page_limit
+                ),
+            )
+            if not raw:
+                break
+            page = self._to_frame(raw, unified, timeframe)
+            page = page[page.index <= until]
+            if page.empty:
+                break
+            pages.append(page)
+            if on_page is not None:
+                on_page(page.index[-1], len(page))
+            next_cursor = page.index[-1] + step
+            if next_cursor <= cursor:  # exchange returned no forward progress
+                break
+            cursor = next_cursor
+
+        if not pages:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+        out = pd.concat(pages)
+        return out[~out.index.duplicated(keep="last")].sort_index()
+
     # ------------------------------------------------------------------
     # Open Interest
     # ------------------------------------------------------------------
