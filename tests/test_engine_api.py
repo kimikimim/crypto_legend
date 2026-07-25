@@ -153,7 +153,7 @@ def test_api_score_endpoint_contract():
 
         # Unified structure zones for chart overlays.
         for zone in body["structure_zones"]:
-            assert zone["type"] in ("fib", "ob", "fvg")
+            assert zone["type"] in ("fib", "ob", "fvg", "sr")
             assert zone["sentiment"] in ("bullish", "bearish", "neutral")
             assert zone["min_price"] <= zone["max_price"]
             assert zone["label"]

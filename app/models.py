@@ -205,6 +205,18 @@ def _structure_zones(result: AnalysisResult) -> list[StructureZoneModel]:
         )
         for g in result.smart_money.fvgs
     ]
+    # Major swing highs/lows as zero-height S/R levels: a swept swing high is
+    # resistance (bearish), a swing low is support (bullish).
+    zones += [
+        StructureZoneModel(
+            type="sr",
+            sentiment="bearish" if lv.side == "high" else "bullish",
+            min_price=lv.price,
+            max_price=lv.price,
+            label=f"{'R' if lv.side == 'high' else 'S'} {lv.timeframe} swing",
+        )
+        for lv in result.swing_levels
+    ]
     return zones
 
 

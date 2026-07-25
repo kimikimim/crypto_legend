@@ -47,7 +47,7 @@ interface BackendKline {
 }
 
 interface StructureZone {
-  type: 'fib' | 'ob' | 'fvg'
+  type: 'fib' | 'ob' | 'fvg' | 'sr'
   sentiment: 'bullish' | 'bearish' | 'neutral'
   min_price: number
   max_price: number
@@ -177,11 +177,90 @@ function zoneLineStyle(zone: StructureZone): {
   if (zone.type === 'fib') {
     return { color: '#22d3ee', lineStyle: LineStyle.Dotted, axisLabelVisible: true }
   }
+  if (zone.type === 'sr') {
+    // Support / resistance swing levels: solid, clearly visible.
+    return {
+      color: zone.sentiment === 'bullish' ? '#4ade80' : '#f87171',
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+    }
+  }
   return {
     color:
       zone.sentiment === 'bullish' ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)',
     lineStyle: LineStyle.SparseDotted,
     axisLabelVisible: false,
+  }
+}
+
+/** Translucent fill for zone bands (the red/blue shaded areas). */
+function zoneBandFill(zone: StructureZone): string {
+  if (zone.type === 'fib') return 'rgba(34, 211, 238, 0.07)'
+  return zone.sentiment === 'bullish'
+    ? 'rgba(59, 130, 246, 0.16)' // blue = support-side zones
+    : 'rgba(239, 68, 68, 0.14)'  // red  = resistance-side zones
+}
+
+// ---------------------------------------------------------------------------
+// Zone band primitive: lightweight-charts has no native rectangles, so we
+// paint translucent full-width bands on the pane canvas, under the candles.
+// ---------------------------------------------------------------------------
+interface BitmapScope {
+  context: CanvasRenderingContext2D
+  bitmapSize: { width: number; height: number }
+  verticalPixelRatio: number
+}
+
+interface RenderTarget {
+  useBitmapCoordinateSpace(fn: (scope: BitmapScope) => void): void
+}
+
+class ZoneBandsPrimitive {
+  private zones: StructureZone[] = []
+  private series: ISeriesApi<'Candlestick'> | null = null
+  private requestUpdate: (() => void) | null = null
+
+  attached(param: { series: unknown; requestUpdate: () => void }): void {
+    this.series = param.series as ISeriesApi<'Candlestick'>
+    this.requestUpdate = param.requestUpdate
+  }
+
+  detached(): void {
+    this.series = null
+    this.requestUpdate = null
+  }
+
+  setZones(zones: StructureZone[]): void {
+    this.zones = zones.filter((z) => z.max_price > z.min_price)
+    this.requestUpdate?.()
+  }
+
+  paneViews() {
+    return [
+      {
+        zOrder: () => 'bottom' as const,
+        renderer: () => ({
+          draw: (target: RenderTarget) => {
+            const series = this.series
+            if (!series) return
+            target.useBitmapCoordinateSpace(
+              ({ context, bitmapSize, verticalPixelRatio }: BitmapScope) => {
+                for (const zone of this.zones) {
+                  const yTop = series.priceToCoordinate(zone.max_price)
+                  const yBottom = series.priceToCoordinate(zone.min_price)
+                  if (yTop == null || yBottom == null) continue
+                  const top = Math.min(yTop, yBottom) * verticalPixelRatio
+                  const height =
+                    Math.abs(yBottom - yTop) * verticalPixelRatio || 1
+                  context.fillStyle = zoneBandFill(zone)
+                  context.fillRect(0, top, bitmapSize.width, height)
+                }
+              },
+            )
+          },
+        }),
+      },
+    ]
   }
 }
 
@@ -207,6 +286,7 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const priceLinesRef = useRef<IPriceLine[]>([])
+  const bandsRef = useRef<ZoneBandsPrimitive | null>(null)
   const barCountRef = useRef(0)
 
   /** Default viewport: the most recent ~120 candles, anchored right. */
@@ -253,6 +333,10 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
     chartRef.current = chart
     seriesRef.current = series
 
+    const bands = new ZoneBandsPrimitive()
+    series.attachPrimitive(bands as Parameters<typeof series.attachPrimitive>[0])
+    bandsRef.current = bands
+
     const observer = new ResizeObserver(() => {
       const rect = el.getBoundingClientRect()
       if (rect.width > 0 && rect.height > 0) {
@@ -265,6 +349,7 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
     return () => {
       observer.disconnect()
       priceLinesRef.current = []
+      bandsRef.current = null
       seriesRef.current = null
       chartRef.current = null
       chart.remove()
@@ -291,7 +376,10 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
     priceLinesRef.current.forEach((line) => series.removePriceLine(line))
     priceLinesRef.current = []
 
-    // Structure & fib zones (pre-filtered by ATR proximity + type toggles).
+    // Shaded red/blue bands for real (non-zero-height) zones.
+    bandsRef.current?.setZones(zones)
+
+    // Boundary / S-R lines (pre-filtered by ATR proximity + type toggles).
     for (const zone of zones) {
       const style = zoneLineStyle(zone)
       priceLinesRef.current.push(
@@ -303,15 +391,19 @@ function PriceChart({ data, zones }: { data: SignalData; zones: StructureZone[] 
           axisLabelVisible: style.axisLabelVisible,
           title: zone.label,
         }),
-        series.createPriceLine({
-          price: zone.min_price,
-          color: style.color,
-          lineStyle: style.lineStyle,
-          lineWidth: 1,
-          axisLabelVisible: style.axisLabelVisible,
-          title: '',
-        }),
       )
+      if (zone.min_price < zone.max_price) {
+        priceLinesRef.current.push(
+          series.createPriceLine({
+            price: zone.min_price,
+            color: style.color,
+            lineStyle: style.lineStyle,
+            lineWidth: 1,
+            axisLabelVisible: style.axisLabelVisible,
+            title: '',
+          }),
+        )
+      }
     }
 
     // Execution levels on top.
@@ -370,6 +462,7 @@ const ZONE_TOGGLE_META: Record<ZoneType, { label: string; dot: string }> = {
   fib: { label: 'FIB', dot: 'bg-cyan-400' },
   ob: { label: 'OB', dot: 'bg-emerald-400' },
   fvg: { label: 'FVG', dot: 'bg-red-400' },
+  sr: { label: 'S/R', dot: 'bg-amber-400' },
 }
 
 function ZoneToggles({
@@ -562,6 +655,7 @@ export default function App() {
     fib: true,
     ob: true,
     fvg: true,
+    sr: true,
   })
 
   // Default noise control: only zones overlapping price ± 2 × ATR(15m).
@@ -571,7 +665,7 @@ export default function App() {
     [data],
   )
   const zoneCounts = useMemo(() => {
-    const counts: Record<ZoneType, number> = { fib: 0, ob: 0, fvg: 0 }
+    const counts: Record<ZoneType, number> = { fib: 0, ob: 0, fvg: 0, sr: 0 }
     nearbyZones.forEach((z) => (counts[z.type] += 1))
     return counts
   }, [nearbyZones])

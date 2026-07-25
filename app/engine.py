@@ -34,6 +34,7 @@ from app.smc import (
     OrderBlock,
     RawBreakout,
     SqueezeAlert,
+    SwingLevel,
     detect_squeeze,
     find_fvgs,
     find_order_blocks,
@@ -87,6 +88,7 @@ class AnalysisResult:
     short_plan: TradePlan | None
     klines: list[dict]                # recent 15m candles for charting
     atr_15m: float | None             # current 15m ATR (for UI zone filtering)
+    swing_levels: list[SwingLevel]    # major 4h/1h S/R swing levels
 
     @property
     def primary_direction(self) -> str:
@@ -236,6 +238,7 @@ class MTFAnalysisEngine:
             atr_15m=(
                 float(row["atr"]) if pd.notna(row["atr"]) and row["atr"] > 0 else None
             ),
+            swing_levels=swing_levels,
         )
 
     @staticmethod
