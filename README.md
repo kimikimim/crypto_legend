@@ -108,6 +108,49 @@ Headline JSON fields: `long_score`, `short_score`, `is_squeeze_warning`,
 `suggested_tp1`, `suggested_tp2`, `risk_weight` (from the higher-scoring
 side), plus full `long_plan` / `short_plan` and category breakdowns.
 
+## Validation infrastructure
+
+The engine is a signal generator; whether it has an *edge* is an open
+question, and these are the tools built to answer it honestly.
+
+```bash
+# 1. Build the local archive (15m drives signals, 1m resolves outcomes)
+.venv/bin/python scripts/download_history.py --years 3
+
+# 2. Replay history, label outcomes, report whether the score is informative
+.venv/bin/python scripts/run_backtest.py --symbols BTCUSDT --stride 4
+```
+
+| Module | Role |
+|---|---|
+| `app/store.py` | Parquet OHLCV archive with gap/duplicate/OHLC-bound validation |
+| `app/replay.py` | Scores any past bar through the *same* `analyze_frames` the live path uses |
+| `app/backtest.py` | Triple-barrier labeling on the 1m path |
+| `app/analysis.py` | Score calibration, category ablation, regime/symbol breakdowns |
+| `app/journal.py` | Forward-test ledger + automatic 15m signal collection |
+
+**Guarantees the numbers rest on.** Replay and live share one code path, so a
+backtest describes the system actually being traded. A past bar's score is
+provably unchanged by future candles (tested by appending a violent rally,
+and a crash that would have mitigated every standing order block). Outcomes
+are resolved minute by minute, and when one minute straddles both stop and
+target the stop is assumed first — results are a lower bound.
+
+**What the backtest cannot tell you.** Binance serves roughly 30 days of Open
+Interest history and no public liquidation history, so the Whale & Liquidity
+category (25 of 100 points) is absent from replay and scores zero there.
+Validating it requires the journal, which records live from the day it is
+switched on and cannot be backfilled. That is why the collector runs by
+default.
+
+**Interpreting results.** BTC, ETH and SOL are strongly correlated intraday,
+so the effective independent sample is well below the trade count; parameters
+were chosen by inspection, so p-values carry an unpriced multiple-testing
+burden; and performance is reported per regime because an aggregate can be
+one good regime carrying three bad ones. A `FLAT` calibration verdict means
+the weighting scheme carries no information — the correct response is to
+change the features, not to re-tune the weights.
+
 ## Determinism & anti-repaint guarantees
 
 - `use_closed_candle=True` (default) drops any still-forming candle on every
