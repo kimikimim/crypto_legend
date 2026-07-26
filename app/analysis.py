@@ -25,6 +25,31 @@ logger = logging.getLogger(__name__)
 DEFAULT_SCORE_BINS = (40, 50, 60, 70, 80, 100)
 
 
+def score_bins(
+    scores: pd.Series, floor: float, buckets: int = 5
+) -> tuple[float, ...]:
+    """Quantile-spaced buckets over the scores that actually occur.
+
+    Fixed 10-point bins are useless when the distribution is compressed —
+    they leave one bucket holding everything and the rest empty, which is how
+    a calibration test ends up 'inconclusive' for want of support rather than
+    for want of signal.
+    """
+    usable = scores[scores >= floor].dropna()
+    if usable.empty:
+        return DEFAULT_SCORE_BINS
+    edges = sorted(
+        {
+            round(float(usable.quantile(q)), 1)
+            for q in np.linspace(0, 1, buckets + 1)
+        }
+    )
+    if len(edges) < 2:
+        return (float(usable.min()), float(usable.max()) + 0.1)
+    edges[-1] = edges[-1] + 0.1  # make the top bucket right-inclusive
+    return tuple(edges)
+
+
 @dataclass(frozen=True)
 class PerformanceStats:
     trades: int

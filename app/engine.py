@@ -33,7 +33,12 @@ from app.risk import (
     decide_verdict,
     determine_regime,
 )
-from app.scoring import ScoreResult, ScoringContext, ScoringEngine
+from app.scoring import (
+    ScoreResult,
+    ScoringContext,
+    ScoringEngine,
+    max_achievable_score,
+)
 from app.smc import (
     FairValueGap,
     LiquiditySweep,
@@ -94,9 +99,20 @@ class AnalysisResult:
     short_plan: TradePlan | None
     klines: list[dict]                # recent 15m candles for charting
     atr_15m: float | None             # current 15m ATR (for UI zone filtering)
+    vol_ratio: float | None           # volume vs its MA on the scored candle
     swing_levels: list[SwingLevel]    # major 4h/1h S/R swing levels
     verdict: str                      # "LONG" | "SHORT" | "NEUTRAL"
     verdict_reasons: tuple[str, ...]  # why NEUTRAL, when it is
+    max_achievable_score: float       # 100 live, 90 without liquidation data
+    score_threshold: float            # cutoff actually applied
+
+    @property
+    def score_pct_of_achievable(self) -> float:
+        """Best score as a share of what was reachable. The only figure that
+        compares across environments — a replay 40 out of 90 is a stricter
+        signal than a live 40 out of 100."""
+        best = max(self.scores.long.total, self.scores.short.total)
+        return best / self.max_achievable_score if self.max_achievable_score else 0.0
 
     @property
     def primary_direction(self) -> str:
@@ -264,7 +280,14 @@ class MTFAnalysisEngine:
         verdict, verdict_reasons = decide_verdict(
             scores.long.total, long_plan, scores.short.total, short_plan, self.cfg
         )
-        logger.info("Verdict for %s: %s", unified, verdict)
+        ceiling = max_achievable_score(liq_signal.source != "none")
+        logger.info(
+            "Verdict for %s: %s (best %.1f / %.0f achievable)",
+            unified,
+            verdict,
+            max(scores.long.total, scores.short.total),
+            ceiling,
+        )
 
         return AnalysisResult(
             symbol=unified,
@@ -292,9 +315,14 @@ class MTFAnalysisEngine:
             atr_15m=(
                 float(row["atr"]) if pd.notna(row["atr"]) and row["atr"] > 0 else None
             ),
+            vol_ratio=(
+                float(row["vol_ratio"]) if pd.notna(row["vol_ratio"]) else None
+            ),
             swing_levels=swing_levels,
             verdict=verdict,
             verdict_reasons=verdict_reasons,
+            max_achievable_score=ceiling,
+            score_threshold=self.cfg.min_score,
         )
 
     @staticmethod

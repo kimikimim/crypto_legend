@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -29,10 +30,12 @@ from app.analysis import (  # noqa: E402
     breakdown,
     category_ablation,
     performance,
+    score_bins,
     score_calibration,
 )
 from app.backtest import TripleBarrierLabeler  # noqa: E402
 from app.config import ALLOWED_SYMBOLS, DEFAULT_CONFIG  # noqa: E402
+from app.engine import MTFAnalysisEngine  # noqa: E402
 from app.replay import Replayer  # noqa: E402
 from app.store import OHLCVStore  # noqa: E402
 
@@ -55,6 +58,14 @@ def main() -> None:
         help="score every Nth 15m bar (use >1 for a fast first pass)",
     )
     parser.add_argument("--reuse-signals", action="store_true")
+    parser.add_argument(
+        "--min-score", type=float, default=None,
+        help=(
+            "override the entry cutoff. Pass 0 to observe the full score "
+            "distribution: the threshold should be DERIVED from calibration, "
+            "not inherited from a live setting tuned on a different ceiling."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -63,9 +74,17 @@ def main() -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    cfg = DEFAULT_CONFIG
+    if args.min_score is not None:
+        cfg = replace(cfg, min_score=args.min_score)
+        print(
+            f"Score gate overridden to {cfg.min_score:g} "
+            f"(default {DEFAULT_CONFIG.min_score:g})"
+        )
+
     store = OHLCVStore()
-    replayer = Replayer()
-    labeler = TripleBarrierLabeler()
+    replayer = Replayer(engine=MTFAnalysisEngine(config=cfg), config=cfg)
+    labeler = TripleBarrierLabeler(cfg)
     start = pd.Timestamp(args.start, tz="UTC") if args.start else None
     end = pd.Timestamp(args.end, tz="UTC") if args.end else None
     warmup_days = DEFAULT_CONFIG.regime_min_candles
@@ -133,9 +152,25 @@ def main() -> None:
     print(f"  {'signal rate':<16} {len(trades) / max(len(signals), 1):.2%} of bars")
 
     print("\n" + "=" * 78)
+    print("SCORE SCALE  (why a replay score is not a live score)")
+    print("=" * 78)
+    ceiling = float(signals["max_achievable_score"].max())
+    best = signals[["long_score", "short_score"]].max(axis=1)
+    print(f"  achievable ceiling here   {ceiling:.0f} / 100")
+    print(f"  liquidation flush (10pts) {'reachable' if ceiling >= 100 else 'UNREACHABLE — no OI/stream history'}")
+    print(f"  entry cutoff applied      {cfg.min_score:g}"
+          f"  ({cfg.min_score / ceiling:.1%} of achievable"
+          f" vs {DEFAULT_CONFIG.min_score / 100:.1%} live)")
+    print("\n  score distribution across all scored bars:")
+    for q in (0.5, 0.9, 0.99, 0.999):
+        print(f"    p{q * 100:<6g} {best.quantile(q):.1f}")
+    print(f"    max     {best.max():.1f}")
+    print(f"  bars clearing the cutoff  {(best >= cfg.min_score).mean():.2%}")
+
+    print("\n" + "=" * 78)
     print("SCORE CALIBRATION  (the decisive test)")
     print("=" * 78)
-    calib = score_calibration(trades)
+    calib = score_calibration(trades, bins=score_bins(best, cfg.min_score))
     _print_table("Expectancy by score bucket", calib.table)
     print(
         f"\n  Spearman rho = {calib.spearman_rho:+.3f} "

@@ -58,6 +58,7 @@ class TripleBarrierLabeler:
         tp1: float,
         tp2: float,
         path: pd.DataFrame,
+        cost_pct: float | None = None,
     ) -> dict | None:
         """Resolve a single trade against its forward 1m path.
 
@@ -95,12 +96,16 @@ class TripleBarrierLabeler:
 
         direction = 1.0 if is_long else -1.0
         gross_pct = direction * (exit_price - entry_price) / entry_price * 100.0
-        cost_pct = self.cfg.round_trip_cost_pct
+        # Charge exactly what the engine quoted for this entry, including its
+        # thin-book slippage. Re-deriving it here would let the two drift.
+        if cost_pct is None:
+            cost_pct = self.cfg.base_round_trip_cost_pct
         net_pct = gross_pct - cost_pct
 
         risk_pct = (abs(entry_price - sl) / entry_price) * 100.0 + cost_pct
         return {
             "barrier": barrier,
+            "cost_pct": cost_pct,
             "exit_at": path.index[idx],
             "exit_price": exit_price,
             "gross_pnl_pct": gross_pct,
@@ -140,6 +145,11 @@ class TripleBarrierLabeler:
                 tp1=float(sig["tp1"]),
                 tp2=float(sig["tp2"]),
                 path=window,
+                cost_pct=(
+                    float(sig["cost_pct"])
+                    if "cost_pct" in sig and pd.notna(sig["cost_pct"])
+                    else None
+                ),
             )
             if outcome is None:
                 missing += 1

@@ -138,19 +138,28 @@ class EngineConfig:
     max_leverage: float = 5.0       # hard cap for suggested leverage
 
     # --- execution costs (Binance USDT-M VIP0, market orders) ---
-    taker_fee_pct: float = 0.05     # per side
-    slippage_pct: float = 0.02      # assumed per side
+    taker_fee_pct: float = 0.05      # per side, fixed by the venue
+    # Slippage is NOT fixed. This engine's best setups are liquidity sweeps
+    # and squeezes — precisely when the book is thinnest and a market order
+    # walks it. Modelled as a calm-market floor plus a volatility term, then
+    # multiplied when the entry sits in a stressed tape.
+    slippage_base_pct: float = 0.01  # per side, quiet market
+    slippage_atr_coef: float = 0.12  # x ATR as % of price, per side
+    slippage_stress_mult: float = 2.5  # applied on sweeps / volume spikes
+    slippage_cap_pct: float = 0.50   # per side sanity ceiling
+
     # --- trade gating: the engine, not the UI, decides tradeability ---
     min_rr_tp1: float = 1.5         # net of costs; below this the setup is skipped
     min_score: float = 40.0         # below this the verdict is NEUTRAL
 
-    # --- backtest ---
+    # --- holding period (a real barrier, enforced live as well as in tests) ---
     max_hold_bars: int = 96         # 15m bars a trade may stay open (24h)
 
     @property
-    def round_trip_cost_pct(self) -> float:
-        """Entry + exit fees and slippage, as a percentage of notional."""
-        return 2.0 * (self.taker_fee_pct + self.slippage_pct)
+    def base_round_trip_cost_pct(self) -> float:
+        """Calm-market round trip: fees plus the slippage floor. Used only
+        where no market context is available."""
+        return 2.0 * (self.taker_fee_pct + self.slippage_base_pct)
 
 
 DEFAULT_CONFIG = EngineConfig()

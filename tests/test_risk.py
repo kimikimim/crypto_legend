@@ -12,9 +12,12 @@ from app.risk import (
     REGIME_BEAR,
     REGIME_BULL,
     REGIME_CHOP,
+    MarketState,
     TradePlanner,
     decide_verdict,
     determine_regime,
+    round_trip_cost_pct,
+    slippage_pct,
 )
 from app.scoring import ScoringContext, ScoringEngine
 from app.smc import LiquiditySweep, OrderBlock, SwingLevel
@@ -192,7 +195,7 @@ def test_realized_risk_equals_the_account_limit(planner, m15, config):
     ):
         plan = _plan(planner, m15, **overrides)
         price = 100.0
-        cost = price * config.round_trip_cost_pct / 100.0
+        cost = price * plan.cost_pct / 100.0
         stop_frac = (abs(price - plan.suggested_sl) + cost) / price
         realized_risk_pct = plan.suggested_leverage * stop_frac * 100.0
         assert realized_risk_pct == pytest.approx(config.account_risk_pct, abs=0.02)
@@ -210,13 +213,18 @@ def test_plan_none_when_atr_unusable(planner, m15):
 # ----------------------------------------------------------------------
 # Cost model & net-RR gate
 # ----------------------------------------------------------------------
+def _calm_cost(config, price=100.0, atr=1.0) -> float:
+    return round_trip_cost_pct(MarketState(price=price, atr=atr), config)
+
+
 def test_net_rr_is_gross_rr_minus_round_trip_costs(planner, m15, config):
     # SL 98.5 (risk 1.5), TP1 forced to the 2x ATR fallback -> 102.0 (reward 2.0).
     plan = _plan(planner, m15)
-    cost = 100.0 * config.round_trip_cost_pct / 100.0
+    cost = 100.0 * _calm_cost(config) / 100.0
     assert plan.rr_tp1 == pytest.approx(2.0 / 1.5, abs=0.01)
     assert plan.rr_tp1_net == pytest.approx((2.0 - cost) / (1.5 + cost), abs=0.01)
     assert plan.rr_tp1_net < plan.rr_tp1  # costs always hurt
+    assert plan.cost_pct == pytest.approx(_calm_cost(config), abs=1e-4)
 
 
 def test_thin_reward_setup_is_rejected(planner, m15):
@@ -236,7 +244,7 @@ def test_generous_reward_setup_is_tradeable(planner, m15):
 
 def test_sizing_accounts_for_costs(planner, m15, config):
     plan = _plan(planner, m15)  # SL 1.5 wide on a 100 price
-    cost = 100.0 * config.round_trip_cost_pct / 100.0
+    cost = 100.0 * _calm_cost(config) / 100.0
     expected_lev = min(
         config.max_leverage,
         (config.account_risk_pct / 100.0) / ((1.5 + cost) / 100.0),
@@ -245,9 +253,89 @@ def test_sizing_accounts_for_costs(planner, m15, config):
 
 
 def test_zero_cost_config_makes_net_equal_gross(m15):
-    free = EngineConfig(taker_fee_pct=0.0, slippage_pct=0.0)
+    free = EngineConfig(
+        taker_fee_pct=0.0, slippage_base_pct=0.0, slippage_atr_coef=0.0
+    )
     plan = _plan(TradePlanner(free), m15)
     assert plan.rr_tp1_net == pytest.approx(plan.rr_tp1, abs=0.01)
+    assert plan.cost_pct == 0.0
+
+
+# ----------------------------------------------------------------------
+# Dynamic slippage: a flat assumption is wrong exactly where this engine
+# trades — sweeps and squeezes clear the book out.
+# ----------------------------------------------------------------------
+def test_slippage_scales_with_volatility(config):
+    quiet = slippage_pct(MarketState(price=100.0, atr=0.1), config)
+    volatile = slippage_pct(MarketState(price=100.0, atr=2.0), config)
+    assert volatile > quiet
+    # 0.1% ATR -> base + 0.12 * 0.1; 2% ATR -> base + 0.12 * 2.
+    assert quiet == pytest.approx(config.slippage_base_pct + 0.12 * 0.1, abs=1e-6)
+    assert volatile == pytest.approx(config.slippage_base_pct + 0.12 * 2.0, abs=1e-6)
+
+
+def test_stressed_tape_multiplies_slippage(config):
+    calm = MarketState(price=100.0, atr=1.0, stressed=False)
+    thin = MarketState(price=100.0, atr=1.0, stressed=True)
+    assert slippage_pct(thin, config) == pytest.approx(
+        slippage_pct(calm, config) * config.slippage_stress_mult
+    )
+
+
+def test_slippage_is_capped(config):
+    absurd = slippage_pct(MarketState(price=100.0, atr=50.0, stressed=True), config)
+    assert absurd == config.slippage_cap_pct
+
+
+def test_unusable_atr_falls_back_to_the_floor(config):
+    assert slippage_pct(MarketState(price=100.0, atr=float("nan")), config) == (
+        config.slippage_base_pct
+    )
+    assert slippage_pct(MarketState(price=0.0, atr=1.0), config) == (
+        config.slippage_base_pct
+    )
+
+
+def test_a_sweep_entry_is_charged_thin_book_costs(planner, m15):
+    """The sweep is the setup and the liquidity hole at the same time; the
+    plan must price that, not the quiet-market figure."""
+    calm = _plan(planner, m15)
+    swept = _plan(
+        planner, m15, sweeps=[LiquiditySweep(99.0, "1h", "low", m15.index[-1])]
+    )
+    assert swept.stressed_entry is True
+    assert calm.stressed_entry is False
+    assert swept.cost_pct > calm.cost_pct
+    assert swept.rr_tp1_net < calm.rr_tp1_net  # same levels, worse economics
+
+
+def test_volume_spike_alone_triggers_thin_book_pricing(planner, m15):
+    spiky = m15.copy()
+    spiky["vol_ratio"] = 3.0
+    plan = _plan(planner, spiky)
+    assert plan.stressed_entry is True
+    assert plan.cost_pct > _plan(planner, m15).cost_pct
+
+
+# ----------------------------------------------------------------------
+# Time barrier, enforced live and not only in the labeler
+# ----------------------------------------------------------------------
+def test_plan_carries_a_time_stop(planner, m15, config):
+    plan = _plan(planner, m15)
+    expected = m15.index[-1] + pd.Timedelta(minutes=15) * (1 + config.max_hold_bars)
+    assert plan.time_stop_at == expected
+
+
+def test_time_stop_honours_a_shorter_holding_period():
+    short = EngineConfig(max_hold_bars=8)
+    idx = pd.date_range("2026-01-01", periods=30, freq="15min", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.2, "high": 100.5, "low": 99.8, "close": 100.0,
+         "volume": 1000.0, "atr": 1.0},
+        index=idx,
+    )
+    plan = _plan(TradePlanner(short), df)
+    assert plan.time_stop_at == idx[-1] + pd.Timedelta(minutes=15) * 9
 
 
 # ----------------------------------------------------------------------
@@ -261,7 +349,7 @@ def _fake_plan(side: str, tradeable: bool, reasons: tuple[str, ...] = ()):
         suggested_sl=98.0, suggested_tp1=103.0, suggested_tp2=106.0,
         risk_weight=0.5, suggested_leverage=2.5, rr_tp1=2.5,
         rr_tp1_net=2.2 if tradeable else 0.3, sl_basis="sweep_wick",
-        tradeable=tradeable, reject_reasons=reasons,
+        tradeable=tradeable, cost_pct=0.36, reject_reasons=reasons,
     )
 
 

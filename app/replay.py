@@ -148,6 +148,9 @@ def result_to_row(result: AnalysisResult) -> dict:
         "verdict": result.verdict,
         "long_score": result.scores.long.total,
         "short_score": result.scores.short.total,
+        "max_achievable_score": result.max_achievable_score,
+        "score_pct_of_achievable": round(result.score_pct_of_achievable, 4),
+        "vol_ratio": result.vol_ratio,
         "sweep_count": len(result.smart_money.sweeps),
         "breakout_count": len(result.smart_money.breakouts),
         "ob_count": len(result.smart_money.order_blocks),
@@ -173,6 +176,9 @@ def result_to_row(result: AnalysisResult) -> dict:
             "risk_weight": plan.risk_weight if plan else None,
             "rr_tp1_net": plan.rr_tp1_net if plan else None,
             "sl_basis": plan.sl_basis if plan else None,
+            "cost_pct": plan.cost_pct if plan else None,
+            "stressed_entry": plan.stressed_entry if plan else None,
+            "time_stop_at": plan.time_stop_at if plan else None,
         }
     )
     return row

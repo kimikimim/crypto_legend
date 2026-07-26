@@ -150,6 +150,9 @@ class TradePlanModel(BaseModel):
     rr_tp1_net: float
     sl_basis: str
     tradeable: bool
+    cost_pct: float
+    stressed_entry: bool
+    time_stop_at: datetime | None
     reject_reasons: list[str]
 
 
@@ -165,6 +168,8 @@ class ScoreResponse(BaseModel):
     regime: str
     verdict: str                  # "LONG" | "SHORT" | "NEUTRAL"
     verdict_reasons: list[str]    # why NEUTRAL, when it is
+    max_achievable_score: float   # 100 with liquidation data, else 90
+    score_threshold: float        # cutoff applied to reach the verdict
     primary_direction: str
     entry_zone: EntryZoneModel | None
     suggested_sl: float | None
@@ -265,6 +270,11 @@ def _plan(p: TradePlan | None) -> TradePlanModel | None:
         rr_tp1_net=p.rr_tp1_net,
         sl_basis=p.sl_basis,
         tradeable=p.tradeable,
+        cost_pct=p.cost_pct,
+        stressed_entry=p.stressed_entry,
+        time_stop_at=(
+            p.time_stop_at.to_pydatetime() if p.time_stop_at is not None else None
+        ),
         reject_reasons=list(p.reject_reasons),
     )
 
@@ -283,6 +293,8 @@ def to_response(result: AnalysisResult) -> ScoreResponse:
         regime=result.regime,
         verdict=result.verdict,
         verdict_reasons=list(result.verdict_reasons),
+        max_achievable_score=result.max_achievable_score,
+        score_threshold=result.score_threshold,
         primary_direction=result.primary_direction,
         entry_zone=primary.entry_zone if primary else None,
         suggested_sl=primary.suggested_sl if primary else None,

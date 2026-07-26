@@ -104,16 +104,31 @@ def test_tp2_counts_only_when_reached_before_the_stop(labeler):
 def test_costs_are_deducted_from_every_outcome(labeler, config):
     win = labeler.resolve_one(**LONG, path=path([(102.5, 99.9, 102.2)]))
     assert win["net_pnl_pct"] == pytest.approx(
-        win["gross_pnl_pct"] - config.round_trip_cost_pct
+        win["gross_pnl_pct"] - config.base_round_trip_cost_pct
     )
     loss = labeler.resolve_one(**LONG, path=path([(100.1, 98.5, 98.7)]))
     # Costs make a loss worse, never better.
     assert loss["net_pnl_pct"] < loss["gross_pnl_pct"]
 
 
+def test_quoted_cost_is_charged_rather_than_re_derived(labeler):
+    """The engine priced this entry's slippage; the labeler must charge the
+    same number or backtest and live drift apart."""
+    quoted = 0.9  # e.g. a sweep entry into a thin book
+    out = labeler.resolve_one(
+        **LONG, path=path([(102.5, 99.9, 102.2)]), cost_pct=quoted
+    )
+    assert out["cost_pct"] == quoted
+    assert out["net_pnl_pct"] == pytest.approx(out["gross_pnl_pct"] - quoted)
+    cheap = labeler.resolve_one(
+        **LONG, path=path([(102.5, 99.9, 102.2)]), cost_pct=0.1
+    )
+    assert out["r_multiple"] < cheap["r_multiple"]
+
+
 def test_r_multiple_uses_the_same_risk_as_position_sizing(labeler, config):
     out = labeler.resolve_one(**LONG, path=path([(102.5, 99.9, 102.2)]))
-    risk_pct = 1.0 + config.round_trip_cost_pct  # 1% stop + round trip
+    risk_pct = 1.0 + config.base_round_trip_cost_pct  # 1% stop + round trip
     assert out["r_multiple"] == pytest.approx(out["net_pnl_pct"] / risk_pct)
 
 

@@ -34,6 +34,24 @@ WHALE_MAX = 25.0
 MOMENTUM_MAX = 15.0
 VOLATILITY_MAX = 15.0
 
+# Whale splits into a price-derived half and a derivatives-derived half.
+# The distinction matters for validation: sweeps are detectable from candles
+# alone and so survive into replay, while the liquidation flush needs OI or
+# stream data that history cannot supply.
+WHALE_SWEEP_MAX = 15.0
+WHALE_LIQUIDATION_MAX = 10.0
+
+
+def max_achievable_score(has_liquidation_data: bool) -> float:
+    """Ceiling actually reachable given what data exists.
+
+    Without liquidation input the flush bonus can never be earned, so the
+    scale is 90, not 100. Comparing a replay score against a live threshold
+    calibrated on 100 silently tightens the gate; every consumer of a score
+    should read it against this number.
+    """
+    return 100.0 if has_liquidation_data else 100.0 - WHALE_LIQUIDATION_MAX
+
 
 @dataclass(frozen=True)
 class ScoringContext:
@@ -276,7 +294,7 @@ class ScoringEngine:
         sweeps = [s for s in ctx.sweeps if s.side == wanted]
         if sweeps:
             s = sweeps[-1]
-            pts += 15.0
+            pts += WHALE_SWEEP_MAX
             reasons.append(
                 f"whale sweep of {s.level_timeframe} swing {s.side} "
                 f"({s.level:.6g}) with close back inside — mean-reversion "
@@ -286,7 +304,7 @@ class ScoringEngine:
         liq = ctx.liquidations
         flushed = liq.long_flush if is_long else liq.short_flush
         if flushed:
-            pts += 10.0
+            pts += WHALE_LIQUIDATION_MAX
             flushed_side = "long" if is_long else "short"
             reasons.append(
                 f"{flushed_side} liquidation flush confirms entry "

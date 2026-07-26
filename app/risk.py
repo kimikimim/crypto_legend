@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.config import DEFAULT_CONFIG, EngineConfig
+from app.config import DEFAULT_CONFIG, TF_DELTA, EngineConfig
 from app.fibonacci import ConfluenceZone, FibLevel, SwingLeg
 from app.indicators import ema
 from app.smc import FairValueGap, LiquiditySweep, OrderBlock, SwingLevel
@@ -29,6 +29,45 @@ logger = logging.getLogger(__name__)
 REGIME_BULL = "bull"
 REGIME_BEAR = "bear"
 REGIME_CHOP = "chop"
+
+
+@dataclass(frozen=True)
+class MarketState:
+    """Execution conditions at the moment of entry.
+
+    Slippage depends on these, so they travel with the plan: the backtest
+    must charge the same cost the live engine quoted, or the two diverge.
+    """
+
+    price: float
+    atr: float
+    vol_ratio: float = 1.0
+    stressed: bool = False   # sweep in progress / volume spike: thin book
+
+
+def slippage_pct(state: MarketState, config: EngineConfig = DEFAULT_CONFIG) -> float:
+    """Per-side slippage estimate, in percent of notional.
+
+    A flat assumption is wrong in both directions: too harsh on a quiet
+    range, far too kind during the liquidation cascades this engine is built
+    to trade. The volatility term scales with ATR as a share of price, and
+    the stress multiplier fires when a sweep or volume spike says the book is
+    being cleared out.
+    """
+    if state.price <= 0 or not math.isfinite(state.atr) or state.atr <= 0:
+        return config.slippage_base_pct
+    atr_pct = state.atr / state.price * 100.0
+    slip = config.slippage_base_pct + config.slippage_atr_coef * atr_pct
+    if state.stressed:
+        slip *= config.slippage_stress_mult
+    return min(slip, config.slippage_cap_pct)
+
+
+def round_trip_cost_pct(
+    state: MarketState, config: EngineConfig = DEFAULT_CONFIG
+) -> float:
+    """Entry plus exit: venue fees (fixed) and slippage (conditions-dependent)."""
+    return 2.0 * (config.taker_fee_pct + slippage_pct(state, config))
 
 
 @dataclass(frozen=True)
@@ -45,6 +84,9 @@ class TradePlan:
     rr_tp1_net: float             # after round-trip fees + slippage
     sl_basis: str                 # which structure anchored the stop
     tradeable: bool               # cleared the net-RR gate
+    cost_pct: float = 0.0         # modelled round-trip cost at entry
+    stressed_entry: bool = False  # thin-book conditions were priced in
+    time_stop_at: pd.Timestamp | None = None  # forced market exit deadline
     reject_reasons: tuple[str, ...] = ()
 
 
@@ -135,6 +177,20 @@ class TradePlanner:
         if not math.isfinite(close) or not math.isfinite(atr) or atr <= 0:
             return None
 
+        # A sweep or a volume spike means the book is being cleared: price
+        # the thin-book slippage rather than the quiet-market figure.
+        vol_ratio = float(m15["vol_ratio"].iloc[-1]) if "vol_ratio" in m15 else 1.0
+        if not math.isfinite(vol_ratio):
+            vol_ratio = 1.0
+        wanted = "low" if is_long else "high"
+        stressed = bool(
+            any(s.side == wanted for s in sweeps)
+            or vol_ratio >= self.cfg.vol_spike_mult
+        )
+        state = MarketState(
+            price=close, atr=atr, vol_ratio=vol_ratio, stressed=stressed
+        )
+
         entry_low, entry_high, entry_is_poi = self._entry_zone(
             is_long, close, atr, zones, order_blocks, fvgs
         )
@@ -148,9 +204,10 @@ class TradePlanner:
         sl, tp1, tp2 = self._enforce_ordering(is_long, close, atr, sl, tp1, tp2)
 
         # Round-trip fees + slippage, in price terms. Every reward/risk figure
-        # below is net of this: a stop 0.3% wide against 0.14% of costs is
+        # below is net of this: a stop 0.3% wide against a 0.14% cost is
         # nearly half cost, and gross RR would badly misrepresent the trade.
-        cost = close * self.cfg.round_trip_cost_pct / 100.0
+        cost_pct = round_trip_cost_pct(state, self.cfg)
+        cost = close * cost_pct / 100.0
         risk_abs = abs(close - sl)
         reward_abs = abs(tp1 - close)
 
@@ -166,9 +223,14 @@ class TradePlanner:
         if rr_tp1_net < self.cfg.min_rr_tp1:
             reject_reasons.append(
                 f"net RR at TP1 {rr_tp1_net:.2f} < required {self.cfg.min_rr_tp1:.2f} "
-                f"(gross {rr_tp1:.2f}, round-trip cost "
-                f"{self.cfg.round_trip_cost_pct:.2f}% of notional)"
+                f"(gross {rr_tp1:.2f}, round-trip cost {cost_pct:.2f}% of notional"
+                + (", thin-book pricing applied)" if stressed else ")")
             )
+
+        # Third barrier, enforced live and not only in the labeler: a position
+        # that has reached neither target nor stop is closed at market, so the
+        # backtest is not assuming an exit the trader was never told about.
+        time_stop_at = m15.index[-1] + TF_DELTA["15m"] * (1 + self.cfg.max_hold_bars)
 
         return TradePlan(
             side=side,
@@ -185,6 +247,9 @@ class TradePlanner:
             rr_tp1_net=round(rr_tp1_net, 2),
             sl_basis=sl_basis,
             tradeable=not reject_reasons,
+            cost_pct=round(cost_pct, 4),
+            stressed_entry=stressed,
+            time_stop_at=time_stop_at,
             reject_reasons=tuple(reject_reasons),
         )
 
