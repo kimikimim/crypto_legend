@@ -38,6 +38,9 @@ interface BackendPlan {
   rr_tp1_net: number
   sl_basis: string
   tradeable: boolean
+  cost_pct: number
+  stressed_entry: boolean
+  time_stop_at: string | null
   reject_reasons: string[]
 }
 
@@ -90,6 +93,9 @@ interface TradePlan {
   risk_weight: number
   rr_net: number
   sl_basis: string
+  cost_pct: number
+  stressed_entry: boolean
+  time_stop_at: string | null
   reject_reasons: string[]
 }
 
@@ -135,6 +141,9 @@ const NEUTRAL_PLAN: TradePlan = {
   risk_weight: 0,
   rr_net: 0,
   sl_basis: '',
+  cost_pct: 0,
+  stressed_entry: false,
+  time_stop_at: null,
   reject_reasons: [],
 }
 
@@ -159,6 +168,9 @@ function toSignalData(r: BackendResponse): SignalData {
           risk_weight: plan.risk_weight,
           rr_net: plan.rr_tp1_net,
           sl_basis: plan.sl_basis,
+          cost_pct: plan.cost_pct,
+          stressed_entry: plan.stressed_entry,
+          time_stop_at: plan.time_stop_at,
           reject_reasons: [],
         }
 
@@ -728,6 +740,18 @@ function PlanPanel({ plan }: { plan: TradePlan }) {
           value={`${plan.rr_net.toFixed(2)} : 1`}
           accent={plan.rr_net >= 2 ? 'text-emerald-400' : 'text-amber-300'}
         />
+        <Row
+          label={plan.stressed_entry ? 'Cost (thin book)' : 'Round-trip cost'}
+          value={`${plan.cost_pct.toFixed(2)}%`}
+          accent={plan.stressed_entry ? 'text-orange-400' : 'text-zinc-400'}
+        />
+        {plan.time_stop_at && (
+          <Row
+            label="Time stop"
+            value={new Date(plan.time_stop_at).toLocaleString()}
+            accent="text-zinc-400"
+          />
+        )}
         <Row label="SL basis" value={plan.sl_basis.replace('_', ' ')} accent="text-zinc-400" />
       </div>
 
